@@ -10,7 +10,8 @@ from app import config
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.redis = redis.from_url(config.REDIS_URL, socket_connect_timeout=2)
+    # socket_timeout: without it a hung (not down) Redis blocks requests forever.
+    app.state.redis = redis.from_url(config.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
     yield
     await app.state.redis.aclose()
 

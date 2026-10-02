@@ -17,6 +17,8 @@ env:
   # Keep in sync with RUFF_VERSION in the Makefile.
   RUFF_VERSION: "0.16.10"
   PYTHON_VERSION: "3.12"
+  # Keep in sync with the uv image tag in core/ and realtime/ Dockerfiles.
+  UV_VERSION: "0.11.15"
   NODE_VERSION: "24"
 
 jobs:
@@ -74,14 +76,15 @@ jobs:
       - name: Install GDAL and GEOS
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gdal-bin libgdal-dev libgeos-dev
-      - uses: actions/setup-python@v7
+          sudo apt-get install -y --no-install-recommends gdal-bin
+      - uses: astral-sh/setup-uv@v7
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: core/requirements.txt
-      - run: pip install -r requirements.txt
-      - run: pytest
+          enable-cache: true
+          cache-dependency-glob: core/uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest
 
   realtime-tests:
     runs-on: ubuntu-latest
@@ -103,13 +106,14 @@ jobs:
         working-directory: realtime
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v7
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
-          cache-dependency-path: realtime/requirements.txt
-      - run: pip install -r requirements.txt
-      - run: pytest
+          enable-cache: true
+          cache-dependency-glob: realtime/uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest
 
   frontend:
     runs-on: ubuntu-latest
