@@ -3,9 +3,10 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# GeoDjango needs GDAL and GEOS
+# GeoDjango needs the GDAL and GEOS shared libraries (gdal-bin pulls in both).
+# The -dev packages are not needed: nothing is compiled against them.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gdal-bin libgdal-dev libgeos-dev \
+    && apt-get install -y --no-install-recommends gdal-bin \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
