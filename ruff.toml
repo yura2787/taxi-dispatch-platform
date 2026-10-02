@@ -1,0 +1,12 @@
+target-version = "py312"
+line-length = 100
+
+# Each service has its own import root (`config` in core, `app` in realtime),
+# so isort must know both to classify first-party imports correctly.
+src = ["core", "realtime"]
+
+# Django migrations are generated code; we never edit them by hand.
+extend-exclude = ["**/migrations/*"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]
