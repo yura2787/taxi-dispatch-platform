@@ -1,5 +1,5 @@
-Django>=5.1,<5.2
-psycopg[binary]>=3.2,<4
-gunicorn>=23.0
-pytest>=8.3
-pytest-django>=4.9
+Django>=5.2,<5.3
+psycopg[binary]>=3.3,<4
+gunicorn>=26.2,<27
+pytest>=9.1,<10
+pytest-django>=4.14,<5
