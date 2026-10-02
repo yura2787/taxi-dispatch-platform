@@ -8,6 +8,7 @@ migrate:
 
 test:
 	docker compose exec -e DJANGO_SETTINGS_MODULE=config.settings.test django pytest
+	docker compose exec realtime pytest
 
 down:
 	docker compose down
