@@ -29,6 +29,22 @@ services:
       timeout: 5s
       retries: 10
 
+  django:
+    build: ./core
+    command: python manage.py runserver 0.0.0.0:8000
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+    ports:
+      - "${DJANGO_PORT}:8000"
+    volumes:
+      - ./core:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:
