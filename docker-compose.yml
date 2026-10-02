@@ -58,6 +58,24 @@ services:
       redis:
         condition: service_healthy
 
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend:/app
+      # Keep the image's node_modules instead of the (empty) host folder.
+      - /app/node_modules
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${NGINX_PORT}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - django
+      - realtime
+      - frontend
+
 volumes:
   postgres_data:
   redis_data:
