@@ -70,8 +70,9 @@ services:
     volumes:
       - ./infra/osrm/data:/data:ro
     healthcheck:
-      # Cheapest real query: snap the city centre to the nearest road.
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5000/nearest/v1/driving/25.9358,48.2921"]
+      # Cheapest real query: snap the city centre to the nearest road. 127.0.0.1, not
+      # localhost: that resolves to IPv6 ::1, and osrm-routed listens on IPv4 only.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5000/nearest/v1/driving/25.9358,48.2921"]
       interval: 10s
       timeout: 5s
       retries: 5
