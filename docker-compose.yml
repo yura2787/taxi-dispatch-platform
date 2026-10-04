@@ -54,10 +54,12 @@ services:
     command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
     environment:
       REDIS_URL: redis://redis:6379/0
+      OSRM_URL: http://osrm:5000
     ports:
       - "${REALTIME_PORT}:8001"
     volumes:
       - ./realtime:/app
+    # No depends_on osrm: realtime must work (with degraded routing) without it.
     depends_on:
       redis:
         condition: service_healthy
