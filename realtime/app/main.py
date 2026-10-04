@@ -14,6 +14,8 @@ from app.services.osrm import CITY_CENTRE, NoRoute, OsrmClient, OsrmUnavailable
 
 # Uvicorn configures only its own loggers; without this, INFO from app modules is lost.
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# httpx logs every request at INFO; OSRM calls are counted in metrics instead.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager

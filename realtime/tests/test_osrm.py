@@ -168,10 +168,18 @@ async def test_osrm_error_codes_raise_no_route(code, reason):
         httpx.Response(502, text="Bad Gateway"),
         httpx.Response(200, text="not json"),
         httpx.Response(400, json={"code": "InvalidQuery"}),
+        httpx.Response(200, json={"code": "Ok", "routes": []}),
         httpx.ReadTimeout("read timed out"),
         httpx.ConnectError("connection refused"),
     ],
-    ids=["5xx", "invalid-json", "unexpected-code", "httpx-timeout", "connect-error"],
+    ids=[
+        "5xx",
+        "invalid-json",
+        "unexpected-code",
+        "ok-without-route",
+        "httpx-timeout",
+        "connect-error",
+    ],
 )
 async def test_failures_raise_osrm_unavailable(response):
     with pytest.raises(OsrmUnavailable):

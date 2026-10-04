@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import httpx
 from pydantic import BaseModel, Field
@@ -22,6 +22,7 @@ from app.metrics import OSRM_REQUEST_DURATION, OSRM_REQUESTS
 logger = logging.getLogger(__name__)
 
 Endpoint = Literal["route", "table", "nearest"]
+T = TypeVar("T")
 
 
 class Point(BaseModel):
@@ -95,10 +96,6 @@ class CircuitBreaker:
         self._opened_at: float | None = None
         self._probing = False
 
-    @property
-    def is_open(self) -> bool:
-        return self._opened_at is not None
-
     def allow(self) -> bool:
         if self._opened_at is None:
             return True
@@ -150,19 +147,20 @@ class OsrmClient:
         else:
             params["overview"] = "false"
 
-        body = await self._get("route", f"/route/v1/driving/{_coordinates(points)}", params)
+        def parse(body: dict[str, Any]) -> Route:
+            route = body["routes"][0]
+            geometry = None
+            if with_geometry:
+                geometry = [_to_point(lon_lat) for lon_lat in route["geometry"]["coordinates"]]
+            return Route(
+                distance_m=round(route["distance"]),
+                duration_s=_with_factor(route["duration"]),
+                snapped_origin=_to_point(body["waypoints"][0]["location"]),
+                snapped_destination=_to_point(body["waypoints"][1]["location"]),
+                geometry=geometry,
+            )
 
-        route = body["routes"][0]
-        geometry = None
-        if with_geometry:
-            geometry = [_to_point(lon_lat) for lon_lat in route["geometry"]["coordinates"]]
-        return Route(
-            distance_m=round(route["distance"]),
-            duration_s=_with_factor(route["duration"]),
-            snapped_origin=_to_point(body["waypoints"][0]["location"]),
-            snapped_destination=_to_point(body["waypoints"][1]["location"]),
-            geometry=geometry,
-        )
+        return await self._get("route", f"/route/v1/driving/{_coordinates(points)}", params, parse)
 
     async def table(self, sources: list[Point], destinations: list[Point]) -> Table:
         if not sources or not destinations:
@@ -179,30 +177,47 @@ class OsrmClient:
             "annotations": "duration",
             "radiuses": _radiuses(points),
         }
-        body = await self._get("table", f"/table/v1/driving/{_coordinates(points)}", params)
 
-        return Table(
-            durations=[
-                [None if seconds is None else _with_factor(seconds) for seconds in row]
-                for row in body["durations"]
-            ],
-            snapped_sources=[_to_point(s["location"]) for s in body["sources"]],
-            snapped_destinations=[_to_point(d["location"]) for d in body["destinations"]],
-        )
+        def parse(body: dict[str, Any]) -> Table:
+            return Table(
+                durations=[
+                    [None if seconds is None else _with_factor(seconds) for seconds in row]
+                    for row in body["durations"]
+                ],
+                snapped_sources=[_to_point(s["location"]) for s in body["sources"]],
+                snapped_destinations=[_to_point(d["location"]) for d in body["destinations"]],
+            )
+
+        return await self._get("table", f"/table/v1/driving/{_coordinates(points)}", params, parse)
 
     async def nearest(self, point: Point) -> Point:
         """The point moved onto the nearest road (within OSRM_SNAP_RADIUS_M)."""
         params = {"number": "1", "radiuses": _radiuses([point])}
-        body = await self._get("nearest", f"/nearest/v1/driving/{_coordinates([point])}", params)
-        return _to_point(body["waypoints"][0]["location"])
+        return await self._get(
+            "nearest",
+            f"/nearest/v1/driving/{_coordinates([point])}",
+            params,
+            lambda body: _to_point(body["waypoints"][0]["location"]),
+        )
 
-    async def _get(self, endpoint: Endpoint, path: str, params: dict[str, str]) -> dict[str, Any]:
+    async def _get(
+        self,
+        endpoint: Endpoint,
+        path: str,
+        params: dict[str, str],
+        parse: Callable[[dict[str, Any]], T],
+    ) -> T:
         if not self._breaker.allow():
             OSRM_REQUESTS.labels(endpoint, "circuit_open").inc()
             raise OsrmUnavailable(f"{endpoint}: circuit breaker is open")
         try:
             with OSRM_REQUEST_DURATION.labels(endpoint).time():
                 body = await self._request(endpoint, path, params)
+            try:
+                result = parse(body)
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                # "Ok", but not the shape we expect: as broken as invalid JSON.
+                raise _unavailable(endpoint, f"malformed response: {exc!r}") from exc
         except OsrmUnavailable:
             OSRM_REQUESTS.labels(endpoint, "unavailable").inc()
             self._breaker.record_failure()
@@ -217,7 +232,7 @@ class OsrmClient:
             raise
         OSRM_REQUESTS.labels(endpoint, "ok").inc()
         self._breaker.record_success()
-        return body
+        return result
 
     async def _request(
         self, endpoint: Endpoint, path: str, params: dict[str, str]
