@@ -23,6 +23,10 @@ log() { printf '==> %s\n' "$*"; }
 
 compose() { docker compose --project-directory "$ROOT_DIR" "$@"; }
 
+# Tool containers run as the host user: on Linux, files written by root would be
+# unreadable for the user (osrm-extract creates some with mode 0700), e.g. for the CI cache.
+run_tool() { compose run --rm -T --user "$(id -u):$(id -g)" "$@"; }
+
 # MD5 of stdin: md5sum on Linux, md5 on macOS.
 md5_of() {
     if command -v md5sum >/dev/null; then
@@ -67,30 +71,37 @@ else
     mv "$DATA_DIR/$SOURCE.part" "$DATA_DIR/$SOURCE"
 fi
 
+# osrm-routed keeps the graph files memory-mapped; replacing them under a running
+# server is unreliable (on Docker Desktop the new files may fail to open).
+osrm_was_running="$(compose ps -q --status running osrm)"
+if [[ -n "$osrm_was_running" ]]; then
+    log "Stopping the osrm service while the graph is rebuilt."
+    compose stop osrm
+fi
+
 # The stamp goes away first: if any step below fails, the next run starts over.
 rm -f "$STAMP" "$DATA_DIR/$GRAPH"*
 
 # 2. Cut the city out of the whole country.
 log "Extracting bbox $OSM_BBOX into $EXTRACT (osmium)."
-compose run --rm -T --build osmium \
+run_tool --build osmium \
     extract -b "$OSM_BBOX" --overwrite -o "/data/$EXTRACT" "/data/$SOURCE"
 
 # 3. Graph for the MLD algorithm.
 log "osrm-extract: turning OSM ways into a road graph with the $OSRM_PROFILE profile."
-compose run --rm -T osrm-prepare osrm-extract -p "/opt/$OSRM_PROFILE.lua" "/data/$EXTRACT"
+run_tool osrm-prepare osrm-extract -p "/opt/$OSRM_PROFILE.lua" "/data/$EXTRACT"
 
 log "osrm-partition: splitting the graph into nested cells."
-compose run --rm -T osrm-prepare osrm-partition "/data/$GRAPH"
+run_tool osrm-prepare osrm-partition "/data/$GRAPH"
 
 log "osrm-customize: precomputing travel times inside each cell."
-compose run --rm -T osrm-prepare osrm-customize "/data/$GRAPH"
+run_tool osrm-prepare osrm-customize "/data/$GRAPH"
 
 # 4. Written last: its presence means the graph is complete.
 echo "$INPUTS_HASH" >"$STAMP"
 log "OSRM graph is ready: $DATA_DIR/$GRAPH"
 
-# A running osrm-routed keeps serving the old graph until restarted.
-if [[ -n "$(compose ps -q --status running osrm)" ]]; then
-    log "Restarting the running osrm service to load the new graph."
-    compose restart osrm
+if [[ -n "$osrm_was_running" ]]; then
+    log "Starting the osrm service with the new graph."
+    compose start osrm
 fi
