@@ -84,7 +84,16 @@ jobs:
           enable-cache: true
           cache-dependency-glob: core/uv.lock
       - run: uv sync --frozen
-      - run: uv run pytest
+      - run: uv run pytest --cov-report=xml
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: core/coverage.xml
+          flags: core
+          # Only this report, not every coverage file found in the repository.
+          disable_search: true
+          # An outage of Codecov must not turn CI red.
+          fail_ci_if_error: false
 
   realtime-tests:
     runs-on: ubuntu-latest
@@ -115,7 +124,16 @@ jobs:
           cache-dependency-glob: realtime/uv.lock
       - run: uv sync --frozen
       # Integration tests need a real OSRM; they run in the osrm-tests job.
-      - run: uv run pytest -m "not osrm"
+      - run: uv run pytest -m "not osrm" --cov-report=xml
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: realtime/coverage.xml
+          flags: realtime
+          # Only this report, not every coverage file found in the repository.
+          disable_search: true
+          # An outage of Codecov must not turn CI red.
+          fail_ci_if_error: false
 
   # Integration tests against a real OSRM with the pinned Chernivtsi graph.
   osrm-tests:
@@ -158,8 +176,18 @@ jobs:
           cache-dependency-glob: realtime/uv.lock
       - run: uv sync --frozen
         working-directory: realtime
-      - run: uv run pytest -m osrm
+      - run: uv run pytest -m osrm --cov-report=xml
         working-directory: realtime
+      # Same flag as the unit tests: Codecov merges both into the realtime coverage.
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: realtime/coverage.xml
+          flags: realtime
+          # Only this report, not every coverage file found in the repository.
+          disable_search: true
+          # An outage of Codecov must not turn CI red.
+          fail_ci_if_error: false
 
   frontend:
     runs-on: ubuntu-latest

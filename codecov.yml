@@ -1,0 +1,22 @@
+coverage:
+  status:
+    # The lines a pull request adds or changes must be covered by tests.
+    patch:
+      default:
+        target: 70%
+        threshold: 2%
+    # Overall coverage may drift a little, but cannot quietly fall.
+    project:
+      default:
+        target: auto
+        threshold: 2%
+
+# One flag per service, so each has its own coverage on codecov.io. Reports with
+# the same flag are merged: realtime is uploaded by both the unit and OSRM jobs.
+flags:
+  core:
+    paths:
+      - core/
+  realtime:
+    paths:
+      - realtime/
