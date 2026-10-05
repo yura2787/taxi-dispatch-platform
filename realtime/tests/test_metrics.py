@@ -1,0 +1,14 @@
+import httpx
+
+from app.main import app
+
+
+async def test_metrics_are_exported_in_prometheus_format():
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/rt/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "# TYPE osrm_requests_total counter" in response.text
+    assert "# TYPE osrm_request_duration_seconds histogram" in response.text

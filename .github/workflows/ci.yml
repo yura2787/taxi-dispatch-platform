@@ -113,7 +113,52 @@ jobs:
           enable-cache: true
           cache-dependency-glob: realtime/uv.lock
       - run: uv sync --frozen
-      - run: uv run pytest
+      # Integration tests need a real OSRM; they run in the osrm-tests job.
+      - run: uv run pytest -m "not osrm"
+
+  # Integration tests against a real OSRM with the pinned Chernivtsi graph.
+  osrm-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OSRM_URL: http://localhost:5000
+      # Fail instead of skipping when OSRM is not reachable.
+      OSRM_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      # docker compose interpolates ${...} from .env even for `config`/`run`.
+      - run: cp .env.example .env
+      - name: Read the OSRM image from docker-compose.yml
+        id: osrm
+        run: echo "image=$(docker compose config --images osrm)" >> "$GITHUB_OUTPUT"
+      # Only the city extract and the graph: the ~850 MB country file is not cached.
+      - uses: actions/cache@v6
+        with:
+          path: infra/osrm/data/chernivtsi.*
+          key: osrm-${{ hashFiles('infra/osrm/map.env') }}-${{ steps.osrm.outputs.image }}
+      # On a cache hit the stamp matches and this does nothing.
+      - run: make osrm
+      # Published port only here: the tests run on the runner, not in the Compose network.
+      - name: Start OSRM
+        run: |
+          docker run -d --name osrm -p 5000:5000 -v "$PWD/infra/osrm/data:/data:ro" \
+            "${{ steps.osrm.outputs.image }}" osrm-routed --algorithm mld /data/chernivtsi.osrm
+          for _ in $(seq 30); do
+            curl -sf "$OSRM_URL/nearest/v1/driving/25.9358,48.2921" > /dev/null && exit 0
+            sleep 1
+          done
+          docker logs osrm
+          exit 1
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: realtime/uv.lock
+      - run: uv sync --frozen
+        working-directory: realtime
+      - run: uv run pytest -m osrm
+        working-directory: realtime
 
   frontend:
     runs-on: ubuntu-latest

@@ -6,11 +6,12 @@ dependencies = [
     "fastapi>=0.142,<1.0",
     "uvicorn[standard]>=0.54,<1.0",
     "redis>=8.1,<9",
+    "httpx>=0.28,<0.29",
+    "prometheus-client>=0.26,<1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.1,<10",
     "pytest-asyncio>=1.4,<2",
-    "httpx>=0.28,<0.29",
 ]

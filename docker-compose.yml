@@ -1,3 +1,7 @@
+# The only place the OSRM version is defined: the graph must be built by the same
+# version that serves it, so osrm-prepare and osrm both use this anchor.
+x-osrm-image: &osrm-image ghcr.io/project-osrm/osrm-backend:v26.4.0
+
 services:
   postgres:
     image: postgis/postgis:16-3.4
@@ -50,13 +54,46 @@ services:
     command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
     environment:
       REDIS_URL: redis://redis:6379/0
+      OSRM_URL: http://osrm:5000
     ports:
       - "${REALTIME_PORT}:8001"
     volumes:
       - ./realtime:/app
+    # No depends_on osrm: realtime must work (with degraded routing) without it.
     depends_on:
       redis:
         condition: service_healthy
+
+  # Needs the graph from `make osrm`. No published port: only services inside the
+  # Docker network talk to it. No restart policy: without a graph it would crash-loop.
+  osrm:
+    image: *osrm-image
+    command: ["osrm-routed", "--algorithm", "mld", "/data/chernivtsi.osrm"]
+    volumes:
+      - ./infra/osrm/data:/data:ro
+    healthcheck:
+      # Cheapest real query: snap the city centre to the nearest road. 127.0.0.1, not
+      # localhost: that resolves to IPv6 ::1, and osrm-routed listens on IPv4 only.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5000/nearest/v1/driving/25.9358,48.2921"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # --- Graph preparation tools, used only by infra/osrm/prepare.sh (`make osrm`) ---
+  osrm-prepare:
+    image: *osrm-image
+    profiles: [tools]
+    volumes:
+      - ./infra/osrm/data:/data
+
+  osmium:
+    build:
+      context: ./infra/osrm
+      dockerfile: osmium.Dockerfile
+    profiles: [tools]
+    volumes:
+      - ./infra/osrm/data:/data
 
   frontend:
     build: ./frontend
