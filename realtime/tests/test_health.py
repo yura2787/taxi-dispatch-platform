@@ -1,17 +1,11 @@
+"""Health check of the realtime service: Redis is critical, OSRM only degrades routing."""
+
 import httpx
 import pytest
-import redis.asyncio as redis
+from redis.asyncio import Redis
 
-from app import config
 from app.main import app
 from app.services.osrm import OsrmClient
-
-
-@pytest.fixture
-async def client():
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
 
 
 def osrm_answering(response: httpx.Response) -> OsrmClient:
@@ -31,15 +25,13 @@ OSRM_UP = httpx.Response(200, json={"code": "Ok", "waypoints": [{"location": [25
 
 
 @pytest.fixture
-async def redis_up():
-    app.state.redis = redis.from_url(config.REDIS_URL)
-    yield
-    await app.state.redis.aclose()
+def redis_up(redis):
+    app.state.redis = redis
 
 
 @pytest.fixture
 async def redis_down():
-    app.state.redis = redis.from_url("redis://invalid-host:6379/0", socket_connect_timeout=1)
+    app.state.redis = Redis.from_url("redis://invalid-host:6379/0", socket_connect_timeout=1)
     yield
     await app.state.redis.aclose()
 

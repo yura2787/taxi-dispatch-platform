@@ -1,12 +1,8 @@
-import httpx
-
-from app.main import app
+"""Prometheus metrics endpoint of the realtime service."""
 
 
-async def test_metrics_are_exported_in_prometheus_format():
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/rt/metrics")
+async def test_metrics_are_exported_in_prometheus_format(client):
+    response = await client.get("/rt/metrics")
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
