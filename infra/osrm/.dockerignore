@@ -1,0 +1,2 @@
+# The osmium image needs nothing from here; never send the ~850 MB map as build context.
+data/
