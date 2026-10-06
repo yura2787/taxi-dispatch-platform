@@ -20,11 +20,19 @@ dev = [
 [tool.pytest.ini_options]
 # Coverage on every run, so a gap shows up while the code is still fresh
 # instead of on the pull request.
-addopts = "--cov=app --cov-report=term-missing"
+# --cov=. (not --cov=app): report paths then start with the package
+# (app/main.py, not main.py), so Codecov can tell files apart.
+addopts = "--cov=. --cov-report=term-missing"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 python_files = ["test_*.py"]
 testpaths = ["tests"]
 markers = [
     "osrm: integration tests against a real OSRM server (skipped if it is not running)",
+]
+
+[tool.coverage.run]
+omit = [
+    # Only the service code is measured; --cov=. would otherwise add the tests.
+    "tests/*",
 ]

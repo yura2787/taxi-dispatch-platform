@@ -1,3 +1,13 @@
+codecov:
+  notify:
+    # Every commit uploads 3 reports (core-tests, realtime-tests, osrm-tests).
+    # Without this, statuses are computed from the first one, and the missing
+    # services look like a coverage drop until the rest arrive.
+    after_n_builds: 3
+
+comment:
+  after_n_builds: 3
+
 coverage:
   status:
     # The lines a pull request adds or changes must be covered by tests.
@@ -10,6 +20,14 @@ coverage:
       default:
         target: auto
         threshold: 2%
+
+# Report paths are relative to each service (config/health.py, app/main.py);
+# prefix them with the service folder instead of letting Codecov guess.
+fixes:
+  - "config/::core/config/"
+  - "apps/::core/apps/"
+  - "conftest.py::core/conftest.py"
+  - "app/::realtime/app/"
 
 # One flag per service, so each has its own coverage on codecov.io. Reports with
 # the same flag are merged: realtime is uploaded by both the unit and OSRM jobs.

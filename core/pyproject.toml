@@ -18,7 +18,9 @@ dev = [
 [tool.pytest.ini_options]
 # Coverage on every run, so a gap shows up while the code is still fresh
 # instead of on the pull request.
-addopts = "--cov=config --cov=apps --cov-report=term-missing"
+# --cov=. (not --cov=config): report paths then start with the package
+# (config/health.py, not health.py), so Codecov can tell files apart.
+addopts = "--cov=. --cov-report=term-missing"
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
 
