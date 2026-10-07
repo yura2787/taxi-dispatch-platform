@@ -10,8 +10,11 @@ def driver_state(driver_id: int | str) -> str:
     return f"driver:{driver_id}:state"
 
 
-def driver_profile(driver_id: int) -> str:
-    """HASH: who the driver is and whether they may work (eligible, tariff, car)."""
+def driver_profile(driver_id: int | str) -> str:
+    """HASH: who the driver is and whether they may work (eligible, tariff, car).
+
+    driver_id may be "*" to build a SCAN pattern over all drivers.
+    """
     return f"driver:{driver_id}:profile"
 
 

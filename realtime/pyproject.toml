@@ -36,3 +36,9 @@ omit = [
     # Only the service code is measured; --cov=. would otherwise add the tests.
     "tests/*",
 ]
+
+[tool.coverage.report]
+exclude_also = [
+    # Entry points of `python -m app.<module>`: tests call main() directly.
+    'if __name__ == "__main__":',
+]
