@@ -5,12 +5,15 @@ Today it is DevAuthenticator (unsigned dev tokens, only with DEV_AUTH=1); stage 
 replaces it with a JWT authenticator behind the same interface.
 """
 
+import logging
 import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
 from app import config
+
+logger = logging.getLogger(__name__)
 
 
 class Role(StrEnum):
@@ -59,3 +62,9 @@ class DevAuthenticator:
 
 def get_authenticator() -> Authenticator:
     return DevAuthenticator()
+
+
+def warn_if_dev_auth() -> None:
+    """Call once at startup: dev tokens must never go unnoticed in the logs."""
+    if config.DEV_AUTH:
+        logger.warning("DEV_AUTH is on: unsigned dev tokens are accepted, anyone can be anyone")

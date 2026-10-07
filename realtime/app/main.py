@@ -10,7 +10,12 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from redis.exceptions import RedisError
 
 from app import config
+from app.auth import warn_if_dev_auth
+from app.clock import Clock
+from app.services.drivers import DriverStore
 from app.services.osrm import CITY_CENTRE, NoRoute, OsrmClient, OsrmUnavailable
+from app.ws.driver import router as driver_ws_router
+from app.ws.manager import ConnectionRegistry
 
 # Uvicorn configures only its own loggers; without this, INFO from app modules is lost.
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -23,12 +28,17 @@ async def lifespan(app: FastAPI):
     # socket_timeout: without it a hung (not down) Redis blocks requests forever.
     app.state.redis = redis.from_url(config.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
     app.state.osrm = OsrmClient(httpx.AsyncClient(base_url=config.OSRM_URL))
+    app.state.drivers = DriverStore(app.state.redis)
+    app.state.driver_connections = ConnectionRegistry()
+    app.state.clock = Clock()
+    warn_if_dev_auth()
     yield
     await app.state.osrm.aclose()
     await app.state.redis.aclose()
 
 
 app = FastAPI(title="RideFlow realtime", lifespan=lifespan)
+app.include_router(driver_ws_router)
 
 
 async def _redis_status(request: Request) -> str:

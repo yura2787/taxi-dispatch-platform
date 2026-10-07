@@ -18,4 +18,5 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
 
 COPY . .
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+# --ws-max-size: keep in sync with WS_MAX_MESSAGE_BYTES in app/config.py.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001", "--ws-max-size", "4096"]

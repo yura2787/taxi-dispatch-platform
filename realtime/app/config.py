@@ -32,6 +32,17 @@ OSRM_BREAKER_RESET_S = 30
 
 
 # --- WebSocket ---
+# The client must send {"type": "auth"} within this time after connecting (spec 12.1).
+WS_AUTH_TIMEOUT_S = 5
+
+# A connection with no message for this long is closed (4000). Clients ping every
+# ~20 s; dead TCP connections are also dropped by uvicorn's protocol-level pings.
+WS_IDLE_TIMEOUT_S = 45
+
+# Any real message is well under 1 KB (a JWT included). Keep in sync with
+# --ws-max-size in docker-compose.yml and the Dockerfile.
+WS_MAX_MESSAGE_BYTES = 4096
+
 # Token bucket per connection, for every message: a phone needs ~0.5/s (a point every
 # 2-3 s plus pings), so 2/s with bursts of 10 never touches a sane client.
 WS_MSG_RATE_PER_S = 2

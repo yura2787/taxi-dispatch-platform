@@ -9,7 +9,7 @@ NaN or Infinity, no unknown fields. A phone sends these several times a second;
 anything that is not exactly right is a bug worth seeing, not something to guess at.
 """
 
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -93,6 +93,20 @@ class ErrorCode(StrEnum):
     LOCATION_OUT_OF_ORDER = "location_out_of_order"
     LOCATION_JUMP = "location_jump"
     RATE_LIMITED = "rate_limited"
+
+
+class CloseCode(IntEnum):
+    # The server closes after 45 s without a message. Not 1000: the client must tell
+    # it from a deliberate close and reconnect.
+    IDLE = 4000
+    INVALID_TOKEN = 4401
+    FORBIDDEN = 4403
+    AUTH_TIMEOUT = 4408
+    # A newer connection of the same user took over.
+    SUPERSEDED = 4409
+    POLICY_VIOLATION = 1008
+    MESSAGE_TOO_BIG = 1009
+    INTERNAL_ERROR = 1011
 
 
 class InvalidMessage(Exception):

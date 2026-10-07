@@ -5,7 +5,14 @@ import importlib
 import pytest
 
 from app import config
-from app.auth import AuthError, DevAuthenticator, Principal, Role, get_authenticator
+from app.auth import (
+    AuthError,
+    DevAuthenticator,
+    Principal,
+    Role,
+    get_authenticator,
+    warn_if_dev_auth,
+)
 
 
 @pytest.fixture
@@ -106,3 +113,18 @@ class TestDevAuthFlag:
         monkeypatch.delenv("DEV_AUTH", raising=False)
 
         assert reload_config().DEV_AUTH is False
+
+
+class TestStartupWarning:
+    def test_dev_auth_on_is_logged_as_a_warning(self, dev_auth, caplog):
+        warn_if_dev_auth()
+
+        assert [record.levelname for record in caplog.records] == ["WARNING"]
+        assert "DEV_AUTH is on" in caplog.text
+
+    def test_nothing_is_logged_when_dev_auth_is_off(self, monkeypatch, caplog):
+        monkeypatch.setattr(config, "DEV_AUTH", False)
+
+        warn_if_dev_auth()
+
+        assert caplog.records == []
