@@ -1,4 +1,5 @@
 import os
+from typing import NamedTuple
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
@@ -28,3 +29,40 @@ OSRM_TABLE_MAX_POINTS = 100
 # for OSRM_BREAKER_RESET_S seconds and fail fast, then let one probe request through.
 OSRM_BREAKER_FAILURES = 5
 OSRM_BREAKER_RESET_S = 30
+
+
+# --- Driver locations ---
+class BoundingBox(NamedTuple):
+    min_lat: float
+    min_lon: float
+    max_lat: float
+    max_lon: float
+
+
+# Chernivtsi with its outskirts, edges included. A point outside is still accepted (the
+# driver is alive), but the driver is not offered orders until they are back inside.
+SERVICE_AREA = BoundingBox(min_lat=48.22, min_lon=25.80, max_lat=48.36, max_lon=26.08)
+
+# Phones send a point every 2-3 s. More than one per second adds no information, only
+# Redis writes, so extra points are dropped before any other check.
+LOCATION_MIN_INTERVAL_S = 1.0
+
+# A point that took this much longer to arrive than the connection's fastest point was
+# recorded earlier (e.g. buffered in a tunnel) and no longer shows where the car is.
+LOCATION_MAX_AGE_S = 10
+
+# Faster than any car in the city: such a move between two points is GPS noise.
+LOCATION_MAX_SPEED_KMH = 150
+
+# After this long without an accepted point the previous one says nothing about the
+# next, so the speed check is skipped. Must stay below DRIVER_SILENCE_S: a driver whose
+# GPS really jumped has to recover before the reaper takes them offline.
+LOCATION_JUMP_RESET_S = 15
+
+# After this many points in a row rejected as stale or out of order, the connection's
+# clock model is assumed wrong (the phone's clock was set back) and starts over.
+LOCATION_CLOCK_RESET_AFTER = 5
+
+# --- Drivers ---
+# A driver online without an accepted point for this long is taken offline by the reaper.
+DRIVER_SILENCE_S = 30
