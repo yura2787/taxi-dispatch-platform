@@ -2,6 +2,12 @@ import os
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
+# --- Authentication ---
+# Dev tokens ("dev:driver:42") carry no signature, so anyone could be any user.
+# They are accepted only with DEV_AUTH=1, which only the dev docker-compose sets.
+# Exactly "1": any other value, a typo included, leaves them off.
+DEV_AUTH = os.environ.get("DEV_AUTH") == "1"
+
 # --- OSRM (routes along Chernivtsi streets) ---
 OSRM_URL = os.environ.get("OSRM_URL", "http://osrm:5000")
 

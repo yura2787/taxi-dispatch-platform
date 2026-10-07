@@ -55,6 +55,8 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       OSRM_URL: http://osrm:5000
+      # Unsigned dev tokens for WebSocket auth; never set outside local development.
+      DEV_AUTH: "1"
     ports:
       - "${REALTIME_PORT}:8001"
     volumes:
