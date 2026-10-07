@@ -64,5 +64,12 @@ LOCATION_JUMP_RESET_S = 15
 LOCATION_CLOCK_RESET_AFTER = 5
 
 # --- Drivers ---
+# Car classes; each has its own GEO set of drivers who can be offered an order.
+TARIFFS = ("economy", "comfort")
+
 # A driver online without an accepted point for this long is taken offline by the reaper.
 DRIVER_SILENCE_S = 30
+
+# The state of an offline driver is kept this long for a quick return (last position),
+# then expires so drivers who left for good do not pile up in Redis.
+OFFLINE_STATE_TTL_S = 24 * 60 * 60
