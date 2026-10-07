@@ -98,3 +98,15 @@ DRIVER_SILENCE_S = 30
 # The state of an offline driver is kept this long for a quick return (last position),
 # then expires so drivers who left for good do not pile up in Redis.
 OFFLINE_STATE_TTL_S = 24 * 60 * 60
+
+# --- Dispatcher process ---
+# The reaper looks for silent drivers this often, so a driver is taken offline
+# DRIVER_SILENCE_S to DRIVER_SILENCE_S + REAPER_INTERVAL_S after their last point.
+REAPER_INTERVAL_S = 10
+
+# Silent drivers fetched per Redis query; a pass repeats it until none are left, so a
+# mass disconnect (e.g. a gateway restart) is cleared in one pass without one huge reply.
+REAPER_BATCH = 500
+
+# Prometheus metrics of the dispatcher. Not published outside the Docker network.
+DISPATCHER_METRICS_PORT = 8002

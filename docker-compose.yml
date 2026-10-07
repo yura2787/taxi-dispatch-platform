@@ -67,6 +67,20 @@ services:
       redis:
         condition: service_healthy
 
+  # Background work over the shared Redis state: the reaper now, dispatch and surge
+  # later. watchfiles restarts it on code changes, like --reload does for realtime.
+  # No published port: its metrics (:8002) are for the Docker network only.
+  dispatcher:
+    build: ./realtime
+    command: watchfiles "python -m app.dispatcher" app
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./realtime:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+
   # Needs the graph from `make osrm`. No published port: only services inside the
   # Docker network talk to it. No restart policy: without a graph it would crash-loop.
   osrm:

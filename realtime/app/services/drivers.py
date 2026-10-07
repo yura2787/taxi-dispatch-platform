@@ -85,6 +85,14 @@ class DriverState:
 
 
 @dataclass(frozen=True, slots=True)
+class DriverCounts:
+    # Sending points: in drivers:last_seen.
+    online: int
+    # Can be offered an order right now: in a GEO set.
+    available: int
+
+
+@dataclass(frozen=True, slots=True)
 class LocationUpdate:
     """A point that passed LocationFilter, with what Redis stores besides it."""
 
@@ -197,6 +205,26 @@ class DriverStore:
             ],
             args=[driver_id, cutoff_ms, config.OFFLINE_STATE_TTL_S],
         )
+
+    async def silent_drivers(self, cutoff_ms: int, limit: int) -> list[int]:
+        """Online drivers whose last accepted point is older than cutoff_ms, oldest first."""
+        members = await self._redis.zrange(
+            redis_keys.drivers_last_seen(),
+            "-inf",
+            f"({cutoff_ms}",  # "(" excludes the cutoff itself, as reap() does
+            byscore=True,
+            offset=0,
+            num=limit,
+        )
+        return [int(member) for member in members]
+
+    async def count_drivers(self) -> DriverCounts:
+        async with self._redis.pipeline(transaction=False) as pipe:
+            pipe.zcard(redis_keys.drivers_last_seen())
+            for key in _geo_keys():
+                pipe.zcard(key)
+            online, *available = await pipe.execute()
+        return DriverCounts(online=online, available=sum(available))
 
     @staticmethod
     async def _run(script: AsyncScript, *, keys: list[str], args: list) -> Outcome:
