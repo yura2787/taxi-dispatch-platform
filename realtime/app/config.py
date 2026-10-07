@@ -31,6 +31,20 @@ OSRM_BREAKER_FAILURES = 5
 OSRM_BREAKER_RESET_S = 30
 
 
+# --- WebSocket ---
+# Token bucket per connection, for every message: a phone needs ~0.5/s (a point every
+# 2-3 s plus pings), so 2/s with bursts of 10 never touches a sane client.
+WS_MSG_RATE_PER_S = 2
+WS_MSG_BURST = 10
+
+# This many messages refused in a row is a broken or hostile client: close with 1008.
+WS_RATE_LIMIT_CLOSE_AFTER = 20
+
+# At most one rate_limited error per this interval: the answer to a flood must not
+# become a flood itself.
+WS_RATE_LIMIT_ERROR_INTERVAL_S = 1.0
+
+
 # --- Driver locations ---
 class BoundingBox(NamedTuple):
     min_lat: float
