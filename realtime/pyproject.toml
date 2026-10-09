@@ -12,6 +12,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "httpx-ws>=0.9,<0.10",
     "pytest>=9.1,<10",
     "pytest-asyncio>=1.4,<2",
     "pytest-cov>=7.1,<8",
@@ -35,4 +36,10 @@ markers = [
 omit = [
     # Only the service code is measured; --cov=. would otherwise add the tests.
     "tests/*",
+]
+
+[tool.coverage.report]
+exclude_also = [
+    # Entry points of `python -m app.<module>`: tests call main() directly.
+    'if __name__ == "__main__":',
 ]
