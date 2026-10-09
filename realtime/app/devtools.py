@@ -16,13 +16,14 @@ from redis.asyncio import Redis
 
 from app import config, redis_keys
 
-FIRST_NAMES = ["Тарас", "Андрій", "Олександр", "Іван", "Дмитро", "Василь", "Олена", "Марія", "Юрій"]
-LAST_NAMES = ["Мельник", "Коваль", "Бойко", "Ткачук", "Шевчук", "Кравчук", "Савчук", "Гуцуляк"]
+# The platform is in English: names in the official Ukrainian transliteration.
+FIRST_NAMES = ["Taras", "Andrii", "Oleh", "Ivan", "Dmytro", "Vasyl", "Olena", "Mariia", "Yurii"]
+LAST_NAMES = ["Melnyk", "Koval", "Boiko", "Tkachuk", "Shevchuk", "Kravchuk", "Savchuk", "Hutsuliak"]
 CARS = {
     "economy": ["Skoda Octavia", "Toyota Corolla", "Hyundai Elantra", "Renault Logan", "Kia Rio"],
     "comfort": ["Toyota Camry", "Skoda Superb", "Kia K5", "Volkswagen Passat", "Hyundai Sonata"],
 }
-COLORS = ["білий", "чорний", "сірий", "сріблястий", "синій", "червоний"]
+COLORS = ["white", "black", "grey", "silver", "blue", "red"]
 # Ukrainian plates use only the Latin letters that look the same in Cyrillic.
 PLATE_LETTERS = "ABCEHIKMOPTX"
 # Chernivtsi region code.
