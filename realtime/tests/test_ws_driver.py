@@ -670,3 +670,23 @@ async def test_close_tolerates_a_client_that_left_at_the_same_moment(store, cloc
     session = DriverSession(ClientGoneWebSocket(), store, ConnectionRegistry(), clock)
 
     await session._close(CloseCode.IDLE, "no messages for too long")
+
+
+class ClientDisconnectedWebSocket:
+    """A socket whose client is already gone: there is nobody to send a close frame to."""
+
+    application_state = WebSocketState.CONNECTED
+    client_state = WebSocketState.DISCONNECTED
+
+    async def close(self, code: int, reason: str) -> None:
+        raise AssertionError("close frame sent to a client that has already left")
+
+
+async def test_close_after_the_client_left_only_counts_and_logs(store, clock, caplog):
+    session = DriverSession(ClientDisconnectedWebSocket(), store, ConnectionRegistry(), clock)
+    before = sample("ws_closes_total", role="unknown", code="4000")
+
+    await session._close(CloseCode.IDLE, "no messages for too long")
+
+    assert sample("ws_closes_total", role="unknown", code="4000") == before + 1
+    assert "Closing driver WebSocket with 4000" in caplog.text

@@ -109,6 +109,30 @@ class TestRunOnce:
         assert sample("reaper_iteration_seconds_count") == passes_before + 1
         assert "Driver 7 reaped" in caplog.text
 
+    async def test_driver_reaped_by_another_dispatcher_is_neither_counted_nor_logged(
+        self, redis, store, clock, reaper, monkeypatch, caplog
+    ):
+        await make_online_driver(redis, store, clock, 7)
+        clock.advance(config.DRIVER_SILENCE_S + 1)
+        list_silent = store.silent_drivers
+
+        async def listed_then_reaped_elsewhere(cutoff_ms, limit):
+            silent = await list_silent(cutoff_ms, limit)
+            # A second dispatcher reaps them between this one's listing and its script.
+            for driver_id in silent:
+                await store.reap(driver_id, cutoff_ms)
+            return silent
+
+        monkeypatch.setattr(store, "silent_drivers", listed_then_reaped_elsewhere)
+        reaped_before = sample("reaper_reaped_total")
+
+        reaped = await reaper.run_once()
+
+        assert reaped == 0
+        assert sample("reaper_reaped_total") == reaped_before
+        assert "Driver 7 reaped" not in caplog.text
+        assert (await store.get_state(7)).status is DriverStatus.OFFLINE
+
     async def test_drivers_online_counts_online_and_offerable_drivers(
         self, redis, store, clock, reaper
     ):
