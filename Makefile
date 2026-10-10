@@ -1,4 +1,4 @@
-.PHONY: up down logs ps migrate test lint osrm
+.PHONY: up down logs ps migrate test lint osrm seed-drivers
 
 # Keep in sync with the ruff version in .github/workflows/ci.yml.
 RUFF_VERSION := 0.16.10
@@ -24,6 +24,11 @@ osrm:
 
 migrate:
 	docker compose exec django python manage.py migrate
+
+# Dev driver profiles 1..n in Redis, for connecting with dev tokens: make seed-drivers n=500
+n ?= 100
+seed-drivers:
+	docker compose exec realtime python -m app.devtools seed-drivers --count $(n)
 
 # Realtime tests use a separate Redis DB so they never touch dev data in DB 0.
 test:

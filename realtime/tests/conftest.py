@@ -1,7 +1,8 @@
 """
 Service-wide test fixtures.
 
-Only universal fixtures live here: an HTTP client for the app and a real Redis.
+Only universal fixtures live here: an HTTP client for the app, a real Redis and
+a controllable clock.
 Domain fixtures (drivers, offers, ...) belong in the test module that needs them,
 or in a ``conftest.py`` of a test subpackage once there is one.
 
@@ -14,7 +15,32 @@ import pytest
 from redis.asyncio import Redis
 
 from app import config
+from app.clock import Clock
 from app.main import app
+
+
+class FakeClock(Clock):
+    """Server time that moves only when a test calls advance()."""
+
+    def __init__(self):
+        # Any realistic moment: 2026-01-01 00:00 UTC.
+        self.wall_ms = 1_767_225_600_000
+        self.mono = 1_000.0
+
+    def now_ms(self) -> int:
+        return self.wall_ms
+
+    def monotonic(self) -> float:
+        return self.mono
+
+    def advance(self, seconds: float) -> None:
+        self.wall_ms += round(seconds * 1000)
+        self.mono += seconds
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
 
 
 @pytest.fixture

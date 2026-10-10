@@ -51,15 +51,32 @@ services:
 
   realtime:
     build: ./realtime
-    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8001
+    # --ws-max-size: keep in sync with WS_MAX_MESSAGE_BYTES in realtime/app/config.py.
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8001 --ws-max-size 4096
     environment:
       REDIS_URL: redis://redis:6379/0
       OSRM_URL: http://osrm:5000
+      # Unsigned dev tokens for WebSocket auth; never set outside local development.
+      DEV_AUTH: "1"
     ports:
       - "${REALTIME_PORT}:8001"
     volumes:
       - ./realtime:/app
     # No depends_on osrm: realtime must work (with degraded routing) without it.
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Background work over the shared Redis state: the reaper now, dispatch and surge
+  # later. watchfiles restarts it on code changes, like --reload does for realtime.
+  # No published port: its metrics (:8002) are for the Docker network only.
+  dispatcher:
+    build: ./realtime
+    command: watchfiles "python -m app.dispatcher" app
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./realtime:/app
     depends_on:
       redis:
         condition: service_healthy
