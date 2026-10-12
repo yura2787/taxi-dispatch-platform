@@ -25,10 +25,12 @@ osrm:
 migrate:
 	docker compose exec django python manage.py migrate
 
-# Dev driver profiles 1..n in Redis, for connecting with dev tokens: make seed-drivers n=500
+# Dev driver profiles first..first+n-1 in Redis, for connecting with dev tokens:
+# make seed-drivers n=500 first=1001
 n ?= 100
+first ?= 1
 seed-drivers:
-	docker compose exec realtime python -m app.devtools seed-drivers --count $(n)
+	docker compose exec realtime python -m app.devtools seed-drivers --count $(n) --first-id $(first)
 
 # Realtime tests use a separate Redis DB so they never touch dev data in DB 0.
 test:
