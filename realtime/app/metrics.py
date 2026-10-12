@@ -50,3 +50,11 @@ LOCATION_UPDATES = Counter(
 # Every result is exported from the start, at 0, so rates work before the first one.
 for _result in LocationResult:
     LOCATION_UPDATES.labels(_result)
+
+# Only points that reached the Lua script (any outcome): throttled and filtered points
+# never touch Redis, and their near-zero times would drag the percentiles down.
+LOCATION_PROCESSING = Histogram(
+    "location_processing_seconds",
+    "Time from a parsed location to the answer of its Lua script.",
+    buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)

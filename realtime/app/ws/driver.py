@@ -25,7 +25,13 @@ from starlette.websockets import WebSocketState
 from app import config
 from app.auth import AuthError, Role, get_authenticator
 from app.clock import Clock
-from app.metrics import LOCATION_UPDATES, WS_CLOSES, WS_CONNECTIONS, LocationResult
+from app.metrics import (
+    LOCATION_PROCESSING,
+    LOCATION_UPDATES,
+    WS_CLOSES,
+    WS_CONNECTIONS,
+    LocationResult,
+)
 from app.schemas.ws import (
     AuthMessage,
     CloseCode,
@@ -260,6 +266,7 @@ class DriverSession:
             self._raise_stale(outcome)
 
     async def _location(self, data: LocationData) -> None:
+        started = self._clock.monotonic()
         decision = self._locations.check(Location(lat=data.lat, lon=data.lon, ts=data.ts))
         if decision.verdict is Verdict.THROTTLED:
             # Normal for a phone sending a bit too often: counted, not answered.
@@ -277,6 +284,8 @@ class DriverSession:
         outcome = await self._store.update_location(
             self._driver_id, self._connection.conn_id, update
         )
+        # Observed only here, see LOCATION_PROCESSING; a Redis error closes with 1011.
+        LOCATION_PROCESSING.observe(self._clock.monotonic() - started)
         if outcome is Outcome.OK:
             self._locations.commit(decision)
             in_zone = decision.in_zone
