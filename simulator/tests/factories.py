@@ -1,5 +1,9 @@
 """Builders of test objects: keyword arguments only, sensible defaults."""
 
+import json
+import random
+
+from sim.driver_bot import DriverBot
 from sim.geo import Point
 from sim.routes import Route
 
@@ -21,3 +25,27 @@ def make_route(*, start: Point = CENTRE, legs_m: tuple[float, ...] = (500, 500))
     for leg in legs_m:
         geometry.append(metres_north(geometry[-1], leg))
     return Route(geometry=tuple(geometry))
+
+
+def make_snapshot(*, status: str = "offline", position: Point | None = None) -> str:
+    """A state_snapshot as the server sends it."""
+    data = {"status": status, "tariff": "economy", "in_zone": True, "position": None}
+    if position is not None:
+        data["position"] = {
+            "lat": position.lat,
+            "lon": position.lon,
+            "heading": None,
+            "speed": None,
+        }
+    return json.dumps({"type": "state_snapshot", "data": data})
+
+
+def make_bot(*, server, osrm, clock, driver_id: int = 7, seed: int = 1) -> DriverBot:
+    """A bot wired to the in-memory server and OSRM of tests/conftest.py."""
+    return DriverBot(
+        driver_id,
+        connect=server.connect,
+        osrm=osrm,
+        clock=clock,
+        rng=random.Random(f"{seed}:{driver_id}"),
+    )
