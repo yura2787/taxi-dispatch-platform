@@ -7,12 +7,17 @@ Life of a bot (ТЗ 08, section 5):
    random delay that doubles with every failed attempt ("full jitter");
 4. on stop: go offline, wait for the snapshot, close with 1000.
 
+Every 5-20 minutes a bot takes a break: offline for a few minutes, the connection
+open, only pings. A flaky bot (a share of them) now and then drops its connection
+without a close frame or falls silent: live load for the reaper and for reconnects.
+
 The car itself (Car + the drive task) lives for the whole bot, not per connection:
 it keeps driving while the bot reconnects, so the bot never jumps.
 """
 
 import asyncio
 import contextlib
+import enum
 import logging
 import random
 from collections import Counter
@@ -37,6 +42,9 @@ OFFLINE = "offline"
 # one is talking to a server it does not understand.
 BUSY_STATUSES = frozenset({"offered", "on_trip"})
 
+# Share of drops among the misbehaviours of a flaky bot; the rest fall silent.
+DROP_SHARE = 0.5
+
 _STOP_LOG_LEVEL = {
     4401: logging.ERROR,
     4403: logging.ERROR,
@@ -54,6 +62,21 @@ class BotStopped(Exception):
 
 class HandshakeTimeout(Exception):
     """No state_snapshot in time after auth or go_online."""
+
+
+class Dropped(Exception):
+    """A flaky bot dropped its connection on purpose and comes back after `seconds`."""
+
+    def __init__(self, seconds: float):
+        super().__init__(f"dropped for {seconds:.0f}s")
+        self.seconds = seconds
+
+
+class Misbehaviour(enum.Enum):
+    # Lose the connection without a close frame, like a phone in a tunnel.
+    DROP = "drop"
+    # Send no points for SILENCE_S (pings go on), like a frozen GPS.
+    SILENCE = "silence"
 
 
 @dataclass
@@ -76,6 +99,9 @@ class BotStats:
     # Pings without a pong by the time of the next one: stalls the RTT samples miss.
     pongs_missed: int = 0
     went_online: bool = False
+    breaks: int = 0
+    drops: int = 0
+    silences: int = 0
 
 
 class Car:
@@ -121,6 +147,7 @@ class DriverBot:
         osrm: OsrmClient,
         clock: Clock,
         rng: random.Random,
+        flaky: bool = False,
     ):
         self.driver_id = driver_id
         self.stats = BotStats()
@@ -128,6 +155,8 @@ class DriverBot:
         self.connected = False
         self.status: str | None = None
         self.stop_reason: str | None = None
+        self.on_break = False
+        self.flaky = flaky
 
         self._connect = connect
         self._osrm = osrm
@@ -153,6 +182,11 @@ class DriverBot:
         self._last_ts = 0
         self._ping_scheduled_at: float | None = None
         self._failed_attempts = 0
+        # Lifetime schedules on the monotonic clock, set when the bot first serves.
+        self._break_at: float | None = None
+        self._break_ends_at = 0.0
+        self._misbehave_at: float | None = None
+        self._silent_until = 0.0
 
     @property
     def position(self) -> Point | None:
@@ -177,12 +211,17 @@ class DriverBot:
                     logger.warning("driver %d: %s, reconnecting", self.driver_id, exc)
                 except Closed as exc:
                     self._on_closed(exc.code)
+                except Dropped as exc:
+                    # Back without a backoff: the drop was the bot's own idea.
+                    await self._sleep_unless_stopped(exc.seconds)
+                    continue
                 else:
                     return
-                if self._stopping.is_set():
-                    return
-                self.stats.reconnects += 1
-                await self._backoff()
+                if not self._stopping.is_set():
+                    self.stats.reconnects += 1
+                    await self._backoff()
+            # Stopped while away from the server (a drop, a reconnect delay).
+            await self._say_goodbye()
         except BotStopped as exc:
             self.stop_reason = exc.reason
         finally:
@@ -195,8 +234,20 @@ class DriverBot:
 
     # --- One connection -------------------------------------------------------
 
-    async def _session(self) -> None:
-        """Returns once the bot has stopped; raises when the connection ends."""
+    async def _say_goodbye(self) -> None:
+        """If the server may still hold the bot online (its last point is fresh, the
+        reaper has not come yet), connect once more just to go offline: after a stop
+        no bot may be left in drivers:last_seen (5.7)."""
+        if self.status != AVAILABLE and self._go_online_sent_at is None:
+            return
+        with contextlib.suppress(ConnectFailed, HandshakeTimeout, Closed, BotStopped):
+            await self._session(goodbye=True)
+
+    async def _session(self, *, goodbye: bool = False) -> None:
+        """Returns once the bot has stopped; raises when the connection ends.
+
+        A goodbye session only authenticates and goes offline.
+        """
         conn = await self._connect()
         self.connected = True
         self.status = None
@@ -206,7 +257,10 @@ class DriverBot:
         stopping = asyncio.create_task(self._stopping.wait())
         ended = False
         try:
-            if await self._handshake(conn, receiver, stopping):
+            if goodbye:
+                self._wants_online = False
+                await self._authenticate(conn, receiver, stopping=None)
+            elif await self._handshake(conn, receiver, stopping):
                 await self._serve(conn, receiver, stopping)
             await self._shutdown(conn, receiver)
             ended = True
@@ -216,8 +270,8 @@ class DriverBot:
                 await conn.close(1000)
             ended = True
             raise
-        except Closed:
-            ended = True  # closed by the server
+        except (Closed, Dropped):
+            ended = True  # closed by the server, or dropped on purpose
             raise
         finally:
             if not ended:
@@ -266,6 +320,26 @@ class DriverBot:
         self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task
     ) -> bool:
         """Auth, then online. False if asked to stop meanwhile."""
+        if not await self._authenticate(conn, receiver, stopping):
+            return False
+        snapshot = self._last_snapshot
+        assert snapshot is not None  # set together with _snapshot_received
+        if self._car is None:
+            await self._place_car(snapshot.position)
+
+        # Going online is the receiver's job (see _on_snapshot); here we only wait.
+        result = await self._wait_online_unless_on_break(receiver, stopping)
+        if result == "timeout":
+            raise HandshakeTimeout("not online after go_online")
+        if result == "stop":
+            return False
+        self.stats.went_online = True
+        return True
+
+    async def _authenticate(
+        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task | None
+    ) -> bool:
+        """Send auth and wait for the first snapshot. False if asked to stop meanwhile."""
         self._snapshot_received.clear()
         await conn.send(protocol.auth(protocol.token_for(self.driver_id)))
         result = await self._wait(
@@ -281,21 +355,17 @@ class DriverBot:
         # The spec resets the backoff here. Known risk: a server that answers auth and
         # then fails at once keeps every bot reconnecting within a second.
         self._failed_attempts = 0
-        snapshot = self._last_snapshot
-        assert snapshot is not None  # set together with _snapshot_received
-        if self._car is None:
-            await self._place_car(snapshot.position)
+        return True
 
-        # Going online is the receiver's job (see _on_snapshot); here we only wait.
-        result = await self._wait(
+    async def _wait_online_unless_on_break(
+        self, receiver: asyncio.Task[None], stopping: asyncio.Task
+    ) -> str:
+        if self.on_break:
+            # Reconnected during a break: stays offline until the break is over.
+            return "event"
+        return await self._wait(
             receiver, seconds=config.CONNECT_TIMEOUT_S, event=self._online, stopping=stopping
         )
-        if result == "timeout":
-            raise HandshakeTimeout("not online after go_online")
-        if result == "stop":
-            return False
-        self.stats.went_online = True
-        return True
 
     async def _serve(
         self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task
@@ -316,6 +386,10 @@ class DriverBot:
                 await self._ping(conn, scheduled_at=next_ping)
                 next_ping = _next_slot(next_ping, config.PING_INTERVAL_S, now)
             if now >= next_tick:
+                # Breaks and misbehaviour are checked on ticks: a moment 2 s late does
+                # not matter, and no extra timer can make the loop spin.
+                await self._update_break(conn, now)
+                self._maybe_misbehave(conn, now)
                 self._check_back_online(now)
                 await self._send_location(conn, now)
                 next_tick = _next_slot(next_tick, config.LOCATION_INTERVAL_S, now)
@@ -335,9 +409,69 @@ class DriverBot:
         self._ping_scheduled_at = scheduled_at
         await conn.send(protocol.ping())
 
-    async def _send_location(self, conn: Connection, now: float) -> None:
-        if self.status != AVAILABLE or self._car is None:
+    async def _update_break(self, conn: Connection, now: float) -> None:
+        if self._break_at is None:
+            self._break_at = now + self._rng.uniform(*config.BREAK_EVERY_S)
+        if self.on_break and now >= self._break_ends_at:
+            self.on_break = False
+            self._wants_online = True
+            self._break_at = now + self._rng.uniform(*config.BREAK_EVERY_S)
+            if self.flaky and self._misbehave_at is not None:
+                # Not right after the break: a misbehaviour due during it waits for
+                # FLAKY_EVERY_S of driving like any other.
+                earliest = now + self._rng.uniform(*config.FLAKY_EVERY_S)
+                self._misbehave_at = max(self._misbehave_at, earliest)
+            self._start_driving()
+            self._go_online_sent_at = now
+            await conn.send(protocol.go_online())
+            logger.info("driver %d: break over, going online", self.driver_id)
+        elif (
+            not self.on_break
+            and now >= self._break_at
+            and self.status == AVAILABLE
+            # A silent bot may already be offline on the server: no break mid-silence.
+            and now >= self._silent_until
+        ):
+            duration = self._rng.uniform(*config.BREAK_DURATION_S)
+            self.on_break = True
+            self._wants_online = False
+            self._break_ends_at = now + duration
+            self.stats.breaks += 1
+            await self._stop_driving()
+            await conn.send(protocol.go_offline())
+            logger.info("driver %d: break for %.0fs", self.driver_id, duration)
+
+    def _maybe_misbehave(self, conn: Connection, now: float) -> None:
+        if not self.flaky:
             return
+        if self._misbehave_at is None:
+            self._misbehave_at = now + self._rng.uniform(*config.FLAKY_EVERY_S)
+        silent = now < self._silent_until
+        if now < self._misbehave_at or self.status != AVAILABLE or self.on_break or silent:
+            return
+        # The next one counts from the end of this one: FLAKY_EVERY_S of normal driving.
+        if self._choose_misbehaviour() is Misbehaviour.SILENCE:
+            self.stats.silences += 1
+            self._silent_until = now + config.SILENCE_S
+            self._misbehave_at = self._silent_until + self._rng.uniform(*config.FLAKY_EVERY_S)
+            logger.info("driver %d: silent for %ds", self.driver_id, config.SILENCE_S)
+            return
+        seconds = self._rng.uniform(*config.DROP_DURATION_S)
+        self._misbehave_at = now + seconds + self._rng.uniform(*config.FLAKY_EVERY_S)
+        self.stats.drops += 1
+        logger.info("driver %d: dropping the connection for %.0fs", self.driver_id, seconds)
+        # No close frame: the server sees what it sees when a phone enters a tunnel.
+        conn.abort()
+        raise Dropped(seconds)
+
+    def _choose_misbehaviour(self) -> Misbehaviour:
+        return Misbehaviour.DROP if self._rng.random() < DROP_SHARE else Misbehaviour.SILENCE
+
+    async def _send_location(self, conn: Connection, now: float) -> None:
+        # On a break the status says "available" until the go_offline is answered.
+        if self.status != AVAILABLE or self.on_break or now < self._silent_until:
+            return
+        assert self._car is not None  # placed in the handshake, before going online
         point, heading, speed = self._car.where(now)
         # Strictly increasing, even if the wall clock stands still or steps back.
         self._last_ts = max(self._clock.now_ms(), self._last_ts + 1)
@@ -399,6 +533,9 @@ class DriverBot:
         else:
             self._offline.clear()
         self._snapshot_received.set()
+        if snapshot.status == AVAILABLE and self.on_break:
+            # Reconnected during a break whose go_offline was lost with the connection.
+            await conn.send(protocol.go_offline())
         # After auth, and after the reaper took the bot offline (not_online + snapshot).
         if snapshot.status == OFFLINE and self._wants_online:
             if self._go_online_sent_at is None:
@@ -445,8 +582,11 @@ class DriverBot:
     async def _backoff(self) -> None:
         delay = reconnect_delay(self._failed_attempts, self._rng)
         self._failed_attempts += 1
+        await self._sleep_unless_stopped(delay)
+
+    async def _sleep_unless_stopped(self, seconds: float) -> None:
         stopping = asyncio.create_task(self._stopping.wait())
-        sleep = asyncio.create_task(self._clock.sleep(delay))
+        sleep = asyncio.create_task(self._clock.sleep(seconds))
         try:
             await asyncio.wait({stopping, sleep}, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -466,7 +606,20 @@ class DriverBot:
             with contextlib.suppress(OsrmUnavailable, NoRoute):
                 start = await self._osrm.nearest(start)
         self._car = Car(start)
+        if not self.on_break:
+            self._start_driving()
+
+    def _start_driving(self) -> None:
         self._drive_task = asyncio.create_task(self._drive())
+
+    async def _stop_driving(self) -> None:
+        """Park the car where it is now (a break)."""
+        if self._drive_task is not None:
+            self._drive_task.cancel()
+            await asyncio.gather(self._drive_task, return_exceptions=True)
+            self._drive_task = None
+        if self._car is not None:
+            self._car.park(self._clock.monotonic())
 
     async def _drive(self) -> None:
         car = self._car

@@ -40,7 +40,9 @@ def make_snapshot(*, status: str = "offline", position: Point | None = None) -> 
     return json.dumps({"type": "state_snapshot", "data": data})
 
 
-def make_bot(*, server, osrm, clock, driver_id: int = 7, seed: int = 1) -> DriverBot:
+def make_bot(
+    *, server, osrm, clock, driver_id: int = 7, seed: int = 1, flaky: bool = False
+) -> DriverBot:
     """A bot wired to the in-memory server and OSRM of tests/conftest.py."""
     return DriverBot(
         driver_id,
@@ -48,4 +50,5 @@ def make_bot(*, server, osrm, clock, driver_id: int = 7, seed: int = 1) -> Drive
         osrm=osrm,
         clock=clock,
         rng=random.Random(f"{seed}:{driver_id}"),
+        flaky=flaky,
     )

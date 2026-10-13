@@ -10,7 +10,7 @@ import pytest
 
 from sim import config, driver_bot
 from sim.connection import Closed, ConnectFailed
-from sim.driver_bot import _next_slot, reconnect_delay
+from sim.driver_bot import Misbehaviour, _next_slot, reconnect_delay
 from sim.geo import Point, haversine_m
 from sim.osrm import NoRoute, OsrmUnavailable
 from tests.conftest import FakeOsrm, FakeServer
@@ -618,6 +618,30 @@ class TestCloses:
 
         assert attempts == [0, 1, 2, 0]
 
+    async def test_stop_during_a_reconnect_delay_goes_offline_first(self, server, osrm, clock):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        server.connections[0].drop(1011)  # the driver stays online on the server (W4)
+
+        bot.stop()
+        await task
+
+        assert server.connections[1].sent_types() == ["auth", "go_offline"]
+        assert server.status == "offline"
+
+    async def test_bot_that_never_got_online_does_not_say_goodbye(self, server, osrm, clock):
+        server.refuse_connections = 100
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        attempts = server.connect_attempts
+
+        bot.stop()
+        await task
+
+        assert server.connect_attempts == attempts
+
     async def test_stop_during_a_reconnect_delay_returns_at_once(self, server, osrm, clock):
         server.refuse_connections = 100
         bot = make_bot(server=server, osrm=osrm, clock=clock)
@@ -780,6 +804,327 @@ class TestShutdown:
 
 
 # ---------------------------------------------------------------------------
+# Breaks
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def short_breaks(monkeypatch):
+    """A break after 60 s online, for 120 s."""
+    monkeypatch.setattr(config, "BREAK_EVERY_S", (60, 60))
+    monkeypatch.setattr(config, "BREAK_DURATION_S", (120, 120))
+
+
+@pytest.fixture
+def timeline(server, clock, monkeypatch) -> list[tuple[float, str]]:
+    """(virtual time, message type) of everything the bot sends."""
+    log: list[tuple[float, str]] = []
+    handle = server.handle
+
+    def record(connection, message):
+        log.append((clock.elapsed, message["type"]))
+        handle(connection, message)
+
+    monkeypatch.setattr(server, "handle", record)
+    return log
+
+
+def between(log, start: float, end: float) -> set[str]:
+    return {kind for t, kind in log if start < t < end}
+
+
+class TestBreaks:
+    async def test_break_goes_offline_pings_and_comes_back(
+        self, server, osrm, clock, short_breaks, timeline
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+
+        await run(bot, clock, 220)
+
+        kinds = [kind for _, kind in timeline]
+        start = kinds.index("go_offline")
+        end = kinds.index("go_online", start)
+        offline_at, online_at = timeline[start][0], timeline[end][0]
+        assert offline_at == pytest.approx(60, abs=2.1)
+        assert online_at - offline_at == pytest.approx(120, abs=2.1)
+        # Only pings while on the break (in the order sent, not just by time: a point
+        # right after go_offline would get not_online).
+        assert set(kinds[start + 1 : end]) == {"ping"}
+        assert bot.stats.breaks == 1
+        assert any(t > online_at for t, kind in timeline if kind == "location")
+
+    async def test_car_does_not_move_during_a_break(self, server, osrm, clock, short_breaks):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(70)
+        parked = bot.position
+
+        await clock.sleep(100)
+        late_in_the_break = (bot.on_break, bot.position)
+        bot.stop()
+        await task
+
+        assert late_in_the_break == (True, parked)
+
+    async def test_driving_resumes_from_the_place_of_the_break(
+        self, server, osrm, clock, short_breaks
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(70)
+        parked = bot.position
+        routes_before = len(osrm.routes)
+
+        await clock.sleep(120)
+        bot.stop()
+        await task
+
+        assert osrm.routes[routes_before].geometry[0] == parked
+
+    async def test_reconnect_during_a_break_stays_offline(self, server, osrm, clock, short_breaks):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(80)
+
+        server.connections[0].drop(1011)
+        await clock.sleep(30)
+        second = server.connections[1].sent_types()
+        bot.stop()
+        await task
+
+        assert "go_online" not in second
+        assert "location" not in second
+        assert bot.stats.went_online is True
+
+    async def test_stop_during_a_break_just_closes(self, server, osrm, clock, short_breaks):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+
+        await run(bot, clock, 90)
+
+        connection = server.connections[0]
+        assert connection.sent_types().count("go_offline") == 1  # the break's own
+        assert connection.closed_with == 1000
+
+    async def test_lost_go_offline_of_a_break_is_sent_again_after_a_reconnect(
+        self, server, osrm, clock, short_breaks
+    ):
+        server.silent.add("go_offline")  # lost with the connection
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(70)
+        server.silent.clear()
+
+        server.connections[0].drop(1011)
+        await clock.sleep(10)
+        bot.stop()
+        await task
+
+        assert "go_offline" in server.connections[1].sent_types()
+        assert server.status == "offline"
+
+    async def test_no_break_during_a_silence(self, server, osrm, clock, short_breaks, monkeypatch):
+        monkeypatch.setattr(config, "FLAKY_EVERY_S", (40, 40))
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.SILENCE)
+
+        # Silent from ~40 to ~90: the break due at ~60 waits for the silence to end.
+        await run(bot, clock, 85)
+
+        assert bot.stats.silences == 1
+        assert bot.stats.breaks == 0
+
+    async def test_misbehaviour_due_during_a_break_waits_after_it(
+        self, server, osrm, clock, short_breaks, monkeypatch
+    ):
+        monkeypatch.setattr(config, "FLAKY_EVERY_S", (100, 100))
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+
+        # The break runs 60-180; the drop due at ~100 comes 100 s after it, not at 180.
+        await run(bot, clock, 230)
+
+        assert bot.stats.breaks == 1
+        assert bot.stats.drops == 0
+
+    async def test_break_waits_until_the_bot_is_online(
+        self, server, osrm, clock, short_breaks, timeline
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(50)
+        server.status = "offline"  # reaped just before the break is due
+        server.silent.add("go_online")
+
+        await clock.sleep(14)
+        status_when_due = bot.status
+        bot.stop()
+        await task
+
+        # The next point got not_online, so at 60 s the bot knows it is offline.
+        assert status_when_due == "offline"
+        assert bot.stats.breaks == 0
+
+
+# ---------------------------------------------------------------------------
+# Flaky bots
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def flaky_every_30_s(monkeypatch):
+    monkeypatch.setattr(config, "FLAKY_EVERY_S", (30, 30))
+    monkeypatch.setattr(config, "DROP_DURATION_S", (10, 10))
+
+
+def flaky_bot(server, osrm, clock, monkeypatch, misbehaviour: Misbehaviour):
+    bot = make_bot(server=server, osrm=osrm, clock=clock, flaky=True)
+    monkeypatch.setattr(bot, "_choose_misbehaviour", lambda: misbehaviour)
+    return bot
+
+
+class TestFlakyDrop:
+    async def test_drop_aborts_without_a_close_frame(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+
+        await run(bot, clock, 35)
+
+        first = server.connections[0]
+        assert first.aborted is True
+        assert first.closed_with is None
+        assert bot.stats.drops == 1
+
+    async def test_comes_back_after_the_drop_without_a_backoff(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s, timeline
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+
+        await run(bot, clock, 45)
+
+        auths = [t for t, kind in timeline if kind == "auth"]
+        assert auths[1] - auths[0] == pytest.approx(30 + 10, abs=2.1)
+        assert bot.stats.reconnects == 0
+
+    async def test_next_misbehaviour_counts_from_the_end_of_the_last(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s, timeline
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+
+        await run(bot, clock, 85)
+
+        # Dropped at ~30 for 10 s, back at ~40, dropped again ~30 s later.
+        auths = [t for t, kind in timeline if kind == "auth"]
+        assert [round(t / 10) * 10 for t in auths] == [0, 40, 80]
+        assert bot.stats.drops == 2
+
+    async def test_car_drives_on_while_the_connection_is_down(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+
+        await run(bot, clock, 50)
+
+        last_before = as_point(locations_of(server.connections[0])[-1])
+        first_after = as_point(locations_of(server.connections[1])[0])
+        gap = haversine_m(last_before, first_after)
+        # ~10-14 s of driving at 25-45 km/h: moved on, but no jump.
+        assert 50 < gap < 200
+
+    async def test_drop_longer_than_the_reaper_ends_with_going_online(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        monkeypatch.setattr(config, "DROP_DURATION_S", (45, 45))
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(40)
+        server.status = "offline"  # the reaper, 30-40 s after the last point
+
+        await clock.sleep(40)
+        bot.stop()
+        await task
+
+        assert server.connections[1].sent_types()[:2] == ["auth", "go_online"]
+        assert locations_of(server.connections[1])
+
+    async def test_stop_during_a_drop_reconnects_once_to_go_offline(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        # Away for 10 s: the server still holds the bot online (the reaper needs 30 s).
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+
+        await run(bot, clock, 34)
+
+        goodbye = server.connections[1]
+        assert goodbye.sent_types() == ["auth", "go_offline"]
+        assert goodbye.closed_with == 1000
+        assert server.status == "offline"
+
+
+class TestFlakySilence:
+    async def test_silence_sends_no_points_but_keeps_pinging(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s, timeline
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.SILENCE)
+
+        await run(bot, clock, 85)
+
+        locations = [t for t, kind in timeline if kind == "location"]
+        gap = max(b - a for a, b in itertools.pairwise(locations))
+        assert gap == pytest.approx(config.SILENCE_S, abs=2.1)
+        silent_from = next(a for a, b in itertools.pairwise(locations) if b - a > 10)
+        assert "ping" in between(timeline, silent_from, silent_from + config.SILENCE_S)
+        assert bot.stats.silences == 1
+
+    async def test_after_the_silence_not_online_brings_it_back(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.SILENCE)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(75)
+        server.status = "offline"  # the reaper takes the silent bot offline
+
+        await clock.sleep(15)
+        bot.stop()
+        await task
+
+        assert bot.stats.errors["not_online"] == 1
+        assert len(server.sent("go_online")) == 2
+
+    async def test_car_keeps_driving_during_the_silence(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.SILENCE)
+
+        await run(bot, clock, 85)
+
+        points = [as_point(location) for location in server.sent("location")]
+        gaps = [haversine_m(a, b) for a, b in itertools.pairwise(points)]
+        # 50 s of silence at 25-45 km/h: the next point is far, but no jump the
+        # server would reject (its jump filter resets after 15 s of silence).
+        assert 300 < max(gaps) < 650
+
+
+class TestFlakyChoice:
+    async def test_bot_that_is_not_flaky_never_misbehaves(
+        self, server, osrm, clock, flaky_every_30_s
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+
+        await run(bot, clock, 300)
+
+        assert (bot.stats.drops, bot.stats.silences) == (0, 0)
+        assert len(server.connections) == 1
+
+    def test_drops_and_silences_are_chosen_about_equally_with_a_seeded_rng(
+        self, server, osrm, clock
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock, flaky=True)
+
+        choices = [bot._choose_misbehaviour() for _ in range(1000)]
+
+        assert 400 < choices.count(Misbehaviour.DROP) < 600
+
+
+# ---------------------------------------------------------------------------
 # Robustness and determinism
 # ---------------------------------------------------------------------------
 
@@ -809,9 +1154,9 @@ class TestDeterminism:
             osrm = FakeOsrm(clock)
             bot = make_bot(server=FakeServer(), osrm=osrm, clock=clock, seed=5, driver_id=3)
             await run(bot, clock, 1800)
-            choices.append([route.geometry[-1] for route in osrm.routes])
+            choices.append(([route.geometry[-1] for route in osrm.routes], bot.stats.breaks))
 
-        assert len(choices[0]) >= 3
+        assert len(choices[0][0]) >= 3
         assert choices[0] == choices[1]
 
     async def test_other_bots_choose_differently(self, clock):
