@@ -36,11 +36,12 @@ seed-drivers:
 test:
 	docker compose exec -e DJANGO_SETTINGS_MODULE=config.settings.test django pytest
 	docker compose exec -e REDIS_URL=redis://redis:6379/15 realtime pytest
+	docker compose --profile sim run --rm --no-deps --build simulator pytest
 
 # `run` (not `exec`) gives a fresh container, so node_modules always matches package.json.
 lint:
-	$(RUFF) check core realtime
-	$(RUFF) format --check core realtime
+	$(RUFF) check core realtime simulator
+	$(RUFF) format --check core realtime simulator
 	docker compose run --rm --no-deps --build frontend sh -c "npm run lint && npm run format:check"
 
 down:

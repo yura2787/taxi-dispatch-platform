@@ -1,0 +1,6 @@
+# Local artefacts that must not end up in the image (the venv lives in /opt/venv).
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+coverage.xml

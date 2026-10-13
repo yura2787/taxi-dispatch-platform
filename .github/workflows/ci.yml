@@ -17,7 +17,7 @@ env:
   # Keep in sync with RUFF_VERSION in the Makefile.
   RUFF_VERSION: "0.16.10"
   PYTHON_VERSION: "3.12"
-  # Keep in sync with the uv image tag in core/ and realtime/ Dockerfiles.
+  # Keep in sync with the uv image tag in the core/, realtime/ and simulator/ Dockerfiles.
   UV_VERSION: "0.11.15"
   NODE_VERSION: "24"
 
@@ -31,8 +31,8 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pip install "ruff==${RUFF_VERSION}"
-      - run: ruff check core realtime
-      - run: ruff format --check core realtime
+      - run: ruff check core realtime simulator
+      - run: ruff format --check core realtime simulator
 
   core-tests:
     runs-on: ubuntu-latest
@@ -130,6 +130,34 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: realtime/coverage.xml
           flags: realtime
+          # Only this report, not every coverage file found in the repository.
+          disable_search: true
+          # An outage of Codecov must not turn CI red.
+          fail_ci_if_error: false
+
+  # Unit tests only: the bots run against in-memory connections and a local
+  # websockets server, so no services are needed.
+  simulator-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: simulator
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: simulator/uv.lock
+      - run: uv sync --frozen
+      - run: uv run pytest --cov-report=xml
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: simulator/coverage.xml
+          flags: simulator
           # Only this report, not every coverage file found in the repository.
           disable_search: true
           # An outage of Codecov must not turn CI red.
