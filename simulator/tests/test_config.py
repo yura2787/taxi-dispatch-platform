@@ -4,11 +4,12 @@ within the server's limits and pick destinations inside the service area."""
 import math
 
 from sim import config
+from sim.geo import BoundingBox
 
 METERS_PER_DEGREE_LAT = 111_195
 
 
-def margin_m(inner: config.BoundingBox, outer: config.BoundingBox) -> float:
+def margin_m(inner: BoundingBox, outer: BoundingBox) -> float:
     """The smallest distance from an edge of `inner` to the same edge of `outer`."""
     meters_per_degree_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(outer.max_lat))
     return min(

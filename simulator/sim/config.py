@@ -6,7 +6,8 @@ from realtime.
 """
 
 import os
-from typing import NamedTuple
+
+from sim.geo import BoundingBox
 
 # --- Addresses ---
 # Bots connect through nginx, like a real phone, not straight to realtime.
@@ -19,13 +20,6 @@ REALTIME_METRICS_URL = os.environ.get("REALTIME_METRICS_URL", "http://realtime:8
 
 
 # --- Areas ---
-class BoundingBox(NamedTuple):
-    min_lat: float
-    min_lon: float
-    max_lat: float
-    max_lon: float
-
-
 # Keep in sync with realtime/app/config.py. Routes that leave it are not used.
 SERVICE_AREA = BoundingBox(min_lat=48.22, min_lon=25.80, max_lat=48.36, max_lon=26.08)
 
