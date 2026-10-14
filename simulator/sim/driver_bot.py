@@ -98,6 +98,8 @@ class BotStats:
     rtt_s: list[float] = field(default_factory=list)
     # Pings without a pong by the time of the next one: stalls the RTT samples miss.
     pongs_missed: int = 0
+    # Tried to connect at all: a bot stopped during the ramp-up never does.
+    started: bool = False
     went_online: bool = False
     breaks: int = 0
     drops: int = 0
@@ -248,6 +250,7 @@ class DriverBot:
 
         A goodbye session only authenticates and goes offline.
         """
+        self.stats.started = True
         conn = await self._connect()
         self.connected = True
         self.status = None

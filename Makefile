@@ -1,4 +1,4 @@
-.PHONY: up down logs ps migrate test lint osrm seed-drivers
+.PHONY: up down logs ps migrate test lint osrm seed-drivers sim
 
 # Keep in sync with the ruff version in .github/workflows/ci.yml.
 RUFF_VERSION := 0.16.10
@@ -31,6 +31,21 @@ n ?= 100
 first ?= 1
 seed-drivers:
 	docker compose exec realtime python -m app.devtools seed-drivers --count $(n) --first-id $(first)
+
+# A live city: driver bots on Chernivtsi streets. Runs until Ctrl+C unless duration
+# is given: make sim drivers=200 [duration=300] [flaky=0.2] [first=1]
+drivers ?= 100
+duration ?=
+flaky ?= 0.05
+sim:
+	@if [ ! -f $(OSRM_STAMP) ]; then \
+		printf '\033[31m%s\033[0m\n' "No OSRM map - run 'make osrm' first: the bots drive along its roads."; \
+		exit 1; \
+	fi
+	$(MAKE) seed-drivers n=$(drivers) first=$(first)
+	docker compose --profile sim run --rm --build simulator python -m sim run \
+		--drivers $(drivers) --first-id $(first) --flaky-share $(flaky) \
+		$(if $(duration),--duration $(duration))
 
 # Realtime tests use a separate Redis DB so they never touch dev data in DB 0.
 test:
