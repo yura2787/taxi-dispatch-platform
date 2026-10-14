@@ -18,7 +18,7 @@ import sys
 
 import httpx
 
-from sim import config, runner
+from sim import config, runner, server_metrics
 from sim.clock import Clock
 from sim.connection import open_connection
 from sim.osrm import OsrmClient
@@ -72,7 +72,8 @@ def parse_args(argv: list[str] | None) -> runner.RunOptions:
     run.add_argument(
         "--strict",
         action="store_true",
-        help="exit with 1 if a bot never got online, stopped for good or was refused (CI)",
+        help="exit with 1 if a bot never got online, stopped for good or was refused, or "
+        "the server accepted no points or its metrics are unavailable (CI)",
     )
     args = parser.parse_args(argv)
     return runner.RunOptions(
@@ -111,6 +112,9 @@ async def simulate(options: runner.RunOptions) -> int:
                 clock=Clock(),
                 stop=stop,
                 url=config.REALTIME_WS_URL,
+                server_metrics_source=lambda: server_metrics.fetch(
+                    http, config.REALTIME_METRICS_URL
+                ),
             )
     except asyncio.CancelledError:
         return 1

@@ -3,6 +3,7 @@ flaky bots, the status line, the loop lag probe and the --strict verdict."""
 
 import asyncio
 import logging
+import math
 from collections import Counter
 from types import SimpleNamespace
 
@@ -11,7 +12,10 @@ import pytest
 from sim import config, runner
 from sim.driver_bot import BotStats
 from sim.runner import RunOptions, flaky_ids, strict_failures
+from sim.server_metrics import ServerMetricsUnavailable, Snapshot
 from tests.conftest import FakeServer
+
+INF = math.inf
 
 
 class City:
@@ -38,7 +42,7 @@ def city(clock) -> City:
     return City(clock)
 
 
-async def simulate(city, osrm, clock, *, stop=None, **options) -> runner.RunResult:
+async def simulate(city, osrm, clock, *, stop=None, metrics=None, **options) -> runner.RunResult:
     return await runner.run(
         RunOptions(**options),
         connect_for=city.connect_for,
@@ -46,7 +50,24 @@ async def simulate(city, osrm, clock, *, stop=None, **options) -> runner.RunResu
         clock=clock,
         stop=stop or asyncio.Event(),
         url="ws://test",
+        server_metrics_source=metrics,
     )
+
+
+class FakeMetrics:
+    """/rt/metrics that counts the points the fake servers took; or is down."""
+
+    def __init__(self, city, *, down_at: frozenset[int] = frozenset()):
+        self.city = city
+        self.calls = 0
+        self.down_at = down_at
+
+    async def __call__(self) -> Snapshot:
+        self.calls += 1
+        if self.calls in self.down_at:
+            raise ServerMetricsUnavailable("ConnectError: refused")
+        accepted = sum(len(server.sent("location")) for server in self.city.servers.values())
+        return Snapshot(updates={"accepted": accepted}, buckets={0.001: accepted, INF: accepted})
 
 
 class TestStart:
@@ -234,3 +255,56 @@ class TestStrict:
         failures = strict_failures([bot])
 
         assert failures == []
+
+
+class TestServerMetrics:
+    async def test_report_has_the_change_of_the_server_metrics(self, city, osrm, clock):
+        metrics = FakeMetrics(city)
+
+        result = await simulate(city, osrm, clock, drivers=2, duration_s=20, metrics=metrics)
+
+        assert metrics.calls == 2  # before and after the run
+        text = "\n".join(result.report)
+        assert "--- server (change of /rt/metrics over the run) ---" in text
+        assert "location updates: accepted=" in text
+
+    async def test_server_that_accepted_no_points_fails_a_strict_run(self, city, osrm, clock):
+        async def nothing_accepted() -> Snapshot:
+            return Snapshot(updates={"accepted": 0})
+
+        result = await simulate(
+            city, osrm, clock, drivers=1, duration_s=10, metrics=nothing_accepted
+        )
+
+        assert result.failures == ["the server accepted no points"]
+
+    @pytest.mark.parametrize("down_at", [frozenset({1}), frozenset({2})], ids=["before", "after"])
+    async def test_unavailable_metrics_are_reported_and_fail_a_strict_run(
+        self, city, osrm, clock, down_at
+    ):
+        metrics = FakeMetrics(city, down_at=down_at)
+
+        result = await simulate(city, osrm, clock, drivers=1, duration_s=10, metrics=metrics)
+
+        assert result.report[-1] == "server metrics: unavailable (ConnectError: refused)"
+        assert result.failures == [
+            "server metrics unavailable: cannot check that points were accepted"
+        ]
+
+    async def test_server_restarted_during_the_run_is_reported(self, city, osrm, clock):
+        snapshots = iter([Snapshot(updates={"accepted": 500}), Snapshot(updates={"accepted": 3})])
+
+        async def restarting() -> Snapshot:
+            return next(snapshots)
+
+        result = await simulate(city, osrm, clock, drivers=1, duration_s=5, metrics=restarting)
+
+        assert result.report[-1] == (
+            "server metrics: unavailable (the server restarted during the run)"
+        )
+
+    async def test_run_without_a_metrics_source_has_no_server_part(self, city, osrm, clock):
+        result = await simulate(city, osrm, clock, drivers=1, duration_s=5)
+
+        assert "--- server (change of /rt/metrics over the run) ---" not in result.report
+        assert not any(line.startswith("server metrics") for line in result.report)

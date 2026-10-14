@@ -10,21 +10,25 @@ cancelled, and the summary is built.
 import asyncio
 import logging
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sim import config, protocol
+from sim import config, protocol, server_metrics
 from sim.clock import Clock
 from sim.driver_bot import Connect, DriverBot
 from sim.osrm import OsrmClient
 from sim.protocol import ErrorVerdict
+from sim.server_metrics import ServerMetricsUnavailable, Snapshot
 from sim.stats import Conditions, StatusLine, Totals, summary
 
 logger = logging.getLogger("sim.runner")
 
 # Each bot gets its own connect() (tests give each its own fake server).
 ConnectFactory = Callable[[int], Connect]
+
+# A fresh snapshot of the server's metrics, or ServerMetricsUnavailable.
+MetricsSource = Callable[[], Awaitable[Snapshot]]
 
 # Errors from the server that mean the bots did something wrong (--strict).
 _BOT_FAULTS = {ErrorVerdict.REJECTED_LOCATION, ErrorVerdict.BUG}
@@ -75,7 +79,9 @@ async def run(
     clock: Clock,
     stop: asyncio.Event,
     url: str,
+    server_metrics_source: MetricsSource | None = None,
 ) -> RunResult:
+    before = await _snapshot(server_metrics_source)
     started_at = datetime.now(UTC)
     flaky = flaky_ids(options)
     bots = [
@@ -135,13 +141,50 @@ async def run(
     if cancelled:
         # They may still be online on the server, waiting for the reaper.
         failures.append(f"{cancelled} bots did not stop in time")
+    report = summary(conditions, bots, loop_lag_s, cancelled=cancelled)
+    if server_metrics_source is not None:
+        server_report, server_failure = await _server_part(before, server_metrics_source)
+        report += server_report
+        if server_failure:
+            failures.append(server_failure)
     return RunResult(
         bots=bots,
         loop_lag_s=loop_lag_s,
-        report=summary(conditions, bots, loop_lag_s, cancelled=cancelled),
+        report=report,
         failures=failures,
         cancelled=cancelled,
     )
+
+
+async def _snapshot(source: MetricsSource | None) -> Snapshot | ServerMetricsUnavailable | None:
+    if source is None:
+        return None
+    try:
+        return await source()
+    except ServerMetricsUnavailable as exc:
+        return exc
+
+
+async def _server_part(
+    before: Snapshot | ServerMetricsUnavailable | None, source: MetricsSource
+) -> tuple[list[str], str | None]:
+    """The server lines of the report and the --strict failure (9.1 d), if any.
+
+    Without metrics the run does not fail on its own, only under --strict: then the
+    one check that the server really took the points is missing.
+    """
+    after = await _snapshot(source)
+    try:
+        for snapshot in (before, after):
+            if isinstance(snapshot, ServerMetricsUnavailable):
+                raise snapshot
+        assert isinstance(before, Snapshot) and isinstance(after, Snapshot)
+        change = after.minus(before)
+    except ServerMetricsUnavailable as exc:
+        line = f"server metrics: unavailable ({exc})"
+        return [line], "server metrics unavailable: cannot check that points were accepted"
+    failure = None if change.accepted > 0 else "the server accepted no points"
+    return server_metrics.report(change), failure
 
 
 def strict_failures(bots: Sequence[DriverBot]) -> list[str]:
