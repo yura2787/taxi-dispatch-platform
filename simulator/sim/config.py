@@ -2,7 +2,7 @@
 
 Values that must match the server are copies, marked "keep in sync with
 realtime/app/config.py": the simulator is an external client and imports nothing
-from realtime.
+from realtime. A drift between them is caught by the e2e-smoke job in CI.
 """
 
 import os
