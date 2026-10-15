@@ -14,10 +14,10 @@ import logging
 import signal
 
 from prometheus_client import start_http_server
-from redis.asyncio import Redis
 
 from app import config
 from app.clock import Clock
+from app.redis_client import create_redis
 from app.services.drivers import DriverStore
 from app.services.reaper import Reaper, run_reaper
 
@@ -32,8 +32,7 @@ async def serve() -> None:
     loop = asyncio.get_running_loop()
     for sig in _STOP_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
-    # socket_timeout: without it a hung (not down) Redis blocks a pass forever.
-    redis = Redis.from_url(config.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+    redis = create_redis()
     try:
         logger.info("Dispatcher started")
         await run_reaper(Reaper(DriverStore(redis), Clock()), stop)
