@@ -3,7 +3,6 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-import redis.asyncio as redis
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -12,6 +11,7 @@ from redis.exceptions import RedisError
 from app import config
 from app.auth import warn_if_dev_auth
 from app.clock import Clock
+from app.redis_client import create_redis
 from app.services.drivers import DriverStore
 from app.services.osrm import CITY_CENTRE, NoRoute, OsrmClient, OsrmUnavailable
 from app.ws.driver import router as driver_ws_router
@@ -25,8 +25,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # socket_timeout: without it a hung (not down) Redis blocks requests forever.
-    app.state.redis = redis.from_url(config.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+    app.state.redis = create_redis()
     app.state.osrm = OsrmClient(httpx.AsyncClient(base_url=config.OSRM_URL))
     app.state.drivers = DriverStore(app.state.redis)
     app.state.driver_connections = ConnectionRegistry()

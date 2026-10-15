@@ -573,6 +573,77 @@ class TestLocations:
             assert await drivers_near(redis) == [DRIVER]
 
 
+class TestLocationProcessingTime:
+    """location_processing_seconds: only points that reached the Lua script count."""
+
+    async def test_point_that_reached_redis_is_timed(
+        self, ws_app, store, profile, clock, monkeypatch
+    ):
+        update_location = store.update_location
+
+        async def slow_update_location(*args, **kwargs):
+            clock.advance(0.004)  # Redis "takes" 4 ms
+            return await update_location(*args, **kwargs)
+
+        monkeypatch.setattr(store, "update_location", slow_update_location)
+        count_before = sample("location_processing_seconds_count")
+        sum_before = sample("location_processing_seconds_sum")
+
+        async with connect() as ws:
+            await online_driver(ws, clock)
+
+        assert sample("location_processing_seconds_count") == count_before + 1
+        assert sample("location_processing_seconds_sum") == pytest.approx(sum_before + 0.004)
+
+    async def test_point_rejected_by_the_script_is_timed_too(self, ws_app, profile, clock):
+        before = sample("location_processing_seconds_count")
+        async with connect() as ws:
+            await auth(ws)
+
+            await send_location(ws, clock)  # offline: the script answers not_online
+
+            await expect_error(ws, "not_online")
+        assert sample("location_processing_seconds_count") == before + 1
+
+    async def test_throttled_point_is_not_timed(self, ws_app, profile, clock):
+        async with connect() as ws:
+            await online_driver(ws, clock)
+            before = sample("location_processing_seconds_count")
+            assert before >= 1  # the point of online_driver was timed
+            clock.advance(0.5)  # below the throttle interval: dropped before Redis
+
+            await send_location(ws, clock)
+            await sync(ws)
+
+        assert sample("location_processing_seconds_count") == before
+
+    async def test_point_rejected_by_the_filter_is_not_timed(self, ws_app, profile, clock):
+        async with connect() as ws:
+            await online_driver(ws, clock)
+            before = sample("location_processing_seconds_count")
+            assert before >= 1  # the point of online_driver was timed
+            clock.advance(2)  # past the throttle, so the jump check stops the point
+
+            await send_location(ws, clock, NORTH_3_KM)
+            await expect_error(ws, "location_jump")
+
+        assert sample("location_processing_seconds_count") == before
+
+    async def test_point_lost_to_a_redis_error_is_not_timed(
+        self, ws_app, store, profile, clock, monkeypatch
+    ):
+        # A failed script call closes with 1011 and is counted in ws_closes_total.
+        before = sample("location_processing_seconds_count")
+        async with connect() as ws:
+            await auth(ws)
+            monkeypatch.setattr(store, "update_location", redis_down)
+
+            await send_location(ws, clock)
+
+            assert await expect_close(ws) == 1011
+        assert sample("location_processing_seconds_count") == before
+
+
 # ---------------------------------------------------------------------------
 # Limits
 # ---------------------------------------------------------------------------

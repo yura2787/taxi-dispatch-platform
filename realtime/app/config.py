@@ -3,6 +3,17 @@ from typing import NamedTuple
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
+# Connections per process. Redis runs commands one at a time, so more connections do
+# not add throughput; they only let a burst queue up in Redis instead of in the pool.
+# A command waits up to REDIS_POOL_TIMEOUT_S for a free connection, then fails like
+# any Redis error (in the gateway the WebSocket closes with 1011): a Redis that busy
+# is not healthy.
+REDIS_MAX_CONNECTIONS = 100
+REDIS_POOL_TIMEOUT_S = 2.0
+
+# Connecting and each command; without it a hung (not down) Redis blocks forever.
+REDIS_SOCKET_TIMEOUT_S = 2.0
+
 # --- Authentication ---
 # Dev tokens ("dev:driver:42") carry no signature, so anyone could be any user.
 # They are accepted only with DEV_AUTH=1, which only the dev docker-compose sets.
