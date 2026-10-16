@@ -60,8 +60,16 @@ class Snapshot:
         return sum(self.updates.get(result, 0) for result in ACCEPTED_RESULTS)
 
     @property
+    def refused_by_result(self) -> dict[str, float]:
+        return {
+            result: count
+            for result, count in self.updates.items()
+            if result.startswith("rejected") and count
+        }
+
+    @property
     def refused(self) -> float:
-        return sum(count for result, count in self.updates.items() if result.startswith("rejected"))
+        return sum(self.refused_by_result.values())
 
     @property
     def throttled(self) -> float:

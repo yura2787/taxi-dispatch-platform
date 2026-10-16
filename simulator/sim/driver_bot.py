@@ -45,6 +45,10 @@ BUSY_STATUSES = frozenset({"offered", "on_trip"})
 # Share of drops among the misbehaviours of a flaky bot; the rest fall silent.
 DROP_SHARE = 0.5
 
+# The goodbye connection after a stop: within the runner's stop budget, which is
+# SHUTDOWN_TIMEOUT_S + 2.
+GOODBYE_TIMEOUT_S = config.SHUTDOWN_TIMEOUT_S + 1
+
 _STOP_LOG_LEVEL = {
     4401: logging.ERROR,
     4403: logging.ERROR,
@@ -79,6 +83,10 @@ class Misbehaviour(enum.Enum):
     SILENCE = "silence"
 
 
+# What may end a goodbye connection: the server, not a bug of the simulator.
+_GOODBYE_FAILURES = (ConnectFailed, HandshakeTimeout, Closed, BotStopped)
+
+
 @dataclass
 class BotStats:
     """What one bot has done; the runner adds up the bots for the report."""
@@ -104,6 +112,9 @@ class BotStats:
     breaks: int = 0
     drops: int = 0
     silences: int = 0
+    # Stops after which the server may still hold the bot online, until the reaper:
+    # go_offline not confirmed in time, or no goodbye connection after a drop.
+    left_online: int = 0
 
 
 class Car:
@@ -242,8 +253,26 @@ class DriverBot:
         no bot may be left in drivers:last_seen (5.7)."""
         if self.status != AVAILABLE and self._go_online_sent_at is None:
             return
-        with contextlib.suppress(ConnectFailed, HandshakeTimeout, Closed, BotStopped):
-            await self._session(goodbye=True)
+        # Bounded, so a slow or absent server never exceeds the runner's stop budget
+        # (SHUTDOWN_TIMEOUT_S + 2); the budget covers connect, auth and go_offline.
+        goodbye = asyncio.create_task(self._session(goodbye=True))
+        deadline = asyncio.create_task(self._clock.sleep(GOODBYE_TIMEOUT_S))
+        try:
+            await asyncio.wait({goodbye, deadline}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (goodbye, deadline):
+                task.cancel()
+            outcome, _ = await asyncio.gather(goodbye, deadline, return_exceptions=True)
+        if isinstance(outcome, asyncio.CancelledError):
+            self._left_online("could not go offline after the stop (timed out)")
+        elif isinstance(outcome, _GOODBYE_FAILURES):
+            self._left_online(f"could not go offline after the stop ({outcome!r})")
+        elif outcome is not None:
+            raise outcome  # a bug, not the server: keep its traceback
+
+    def _left_online(self, why: str) -> None:
+        self.stats.left_online += 1
+        logger.warning("driver %d: %s; online until the reaper takes it", self.driver_id, why)
 
     async def _session(self, *, goodbye: bool = False) -> None:
         """Returns once the bot has stopped; raises when the connection ends.
@@ -494,7 +523,11 @@ class DriverBot:
             if self.status == AVAILABLE or self._go_online_sent_at is not None:
                 self._offline.clear()  # an older "offline" must not end the wait
                 await conn.send(protocol.go_offline())
-                await self._wait(receiver, seconds=config.SHUTDOWN_TIMEOUT_S, event=self._offline)
+                result = await self._wait(
+                    receiver, seconds=config.SHUTDOWN_TIMEOUT_S, event=self._offline
+                )
+                if result == "timeout":
+                    self._left_online("go_offline not confirmed")
             await conn.close(1000)
         except Closed as exc:
             # The server closed first: nothing left to close, only to count.

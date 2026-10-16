@@ -171,11 +171,15 @@ class FakeServer:
         self.close_after_auth: int | str | None = None
         # This many connection attempts fail before one succeeds.
         self.refuse_connections = 0
+        # Connection attempts never finish (a server that accepts no TCP at all).
+        self.hang_connections = False
         self.connections: list[FakeConnection] = []
         self.connect_attempts = 0
 
     async def connect(self) -> FakeConnection:
         self.connect_attempts += 1
+        if self.hang_connections:
+            await asyncio.Event().wait()
         if self.refuse_connections:
             self.refuse_connections -= 1
             raise ConnectFailed("connection refused")

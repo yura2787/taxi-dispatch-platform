@@ -143,10 +143,11 @@ async def run(
         failures.append(f"{cancelled} bots did not stop in time")
     report = summary(conditions, bots, loop_lag_s, cancelled=cancelled)
     if server_metrics_source is not None:
-        server_report, server_failure = await _server_part(before, server_metrics_source)
+        server_report, server_failures = await _server_part(
+            before, server_metrics_source, bots=bots, cancelled=cancelled
+        )
         report += server_report
-        if server_failure:
-            failures.append(server_failure)
+        failures += server_failures
     return RunResult(
         bots=bots,
         loop_lag_s=loop_lag_s,
@@ -166,9 +167,13 @@ async def _snapshot(source: MetricsSource | None) -> Snapshot | ServerMetricsUna
 
 
 async def _server_part(
-    before: Snapshot | ServerMetricsUnavailable | None, source: MetricsSource
-) -> tuple[list[str], str | None]:
-    """The server lines of the report and the --strict failure (9.1 d), if any.
+    before: Snapshot | ServerMetricsUnavailable | None,
+    source: MetricsSource,
+    *,
+    bots: Sequence[DriverBot],
+    cancelled: int,
+) -> tuple[list[str], list[str]]:
+    """The server lines of the report and the --strict failures (9.1 d and more).
 
     Without metrics the run does not fail on its own, only under --strict: then the
     one check that the server really took the points is missing.
@@ -182,26 +187,77 @@ async def _server_part(
         change = after.minus(before)
     except ServerMetricsUnavailable as exc:
         line = f"server metrics: unavailable ({exc})"
-        return [line], "server metrics unavailable: cannot check that points were accepted"
-    failure = None if change.accepted > 0 else "the server accepted no points"
-    return server_metrics.report(change), failure
+        return [line], ["server metrics unavailable: cannot check that points were accepted"]
+    return server_metrics.report(change), server_failures(change, bots, cancelled=cancelled)
+
+
+def server_failures(
+    change: Snapshot, bots: Sequence[DriverBot], *, cancelled: int = 0
+) -> list[str]:
+    """Why a run is not clean, from the server's side (9.1 d and more): what changed
+    in its metrics over the run.
+
+    Blind spot: the server counts the points of every client, so points of others
+    (e.g. a developer's browser) during the run can hide points the bots lost.
+    """
+    failures = []
+    if change.accepted <= 0:
+        failures.append("the server accepted no points")
+    refused = dict(change.refused_by_result)
+    if any_flaky(bots):
+        # Points of silent flaky bots after the reaper took them offline.
+        refused.pop("rejected_offline", None)
+    if refused:
+        failures.append(f"points refused by the server: {refused}")
+    closes = {code: count for code, count in change.closes.items() if count}
+    if closes:
+        failures.append(f"drivers closed by the server: {closes}")
+    totals = Totals.of(bots)
+    # A connection that ends without a goodbye (a drop, a close by the server, a
+    # timeout, a cancelled bot) may take the points still in its socket with it;
+    # those cases are failures of their own when they are not the bots' drops.
+    may_lose = totals.drops + totals.reconnects + cancelled
+    missing = totals.locations_sent - sum(change.updates.values())
+    if missing > may_lose:
+        failures.append(f"{missing:.0f} points sent by the bots never reached the server")
+    return failures
+
+
+def any_flaky(bots: Sequence[DriverBot]) -> bool:
+    """From the bots themselves: a share rounds to no flaky bot among a few bots."""
+    return any(bot.flaky for bot in bots)
 
 
 def strict_failures(bots: Sequence[DriverBot]) -> list[str]:
-    """Why a run is not clean (ТЗ 08, 9.1 a-c): the server refused the bots something."""
+    """Why a run is not clean, from the bots' side (ТЗ 08, 9.1 a-c and more): anything
+    the server refused, closed or did not answer. Flaky bots misbehave on purpose,
+    but none of that ends in a close or a failed connection; their silences end in
+    not_online, which only counts as a failure when no bot is flaky."""
     totals = Totals.of(bots)
     failures = []
     if totals.never_online:
         failures.append(f"{totals.never_online} bots never got online")
     if totals.stopped:
         failures.append(f"bots stopped for good: {dict(totals.stopped)}")
+    verdicts = _BOT_FAULTS if any_flaky(bots) else _BOT_FAULTS | {ErrorVerdict.NOT_ONLINE}
     faults = {
         code: count
         for code, count in totals.errors.items()
-        if protocol.classify_error(code) in _BOT_FAULTS
+        if protocol.classify_error(code) in verdicts
     }
     if faults:
         failures.append(f"server errors caused by the bots: {faults}")
+    if totals.closes:
+        failures.append(f"connections closed by the server: {dict(totals.closes)}")
+    if totals.connect_failures or totals.handshake_timeouts:
+        failures.append(
+            f"failed connections: {totals.connect_failures}, "
+            f"handshake timeouts: {totals.handshake_timeouts}"
+        )
+    if totals.unknown_messages:
+        failures.append(f"unknown messages from the server: {totals.unknown_messages}")
+    if totals.left_online:
+        failures.append(f"{totals.left_online} bots may be left online after the stop")
     return failures
 
 

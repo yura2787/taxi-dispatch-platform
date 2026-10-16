@@ -10,7 +10,7 @@ import pytest
 
 from sim import config, driver_bot
 from sim.connection import Closed, ConnectFailed
-from sim.driver_bot import Misbehaviour, _next_slot, reconnect_delay
+from sim.driver_bot import GOODBYE_TIMEOUT_S, Misbehaviour, _next_slot, reconnect_delay
 from sim.geo import Point, haversine_m
 from sim.osrm import NoRoute, OsrmUnavailable
 from tests.conftest import FakeOsrm, FakeServer
@@ -714,6 +714,8 @@ class TestShutdown:
 
         assert server.connections[0].closed_with == 1000
         assert clock.elapsed - stopped_at == pytest.approx(config.SHUTDOWN_TIMEOUT_S, abs=0.1)
+        # Not confirmed: the server may hold the driver online until the reaper.
+        assert bot.stats.left_online == 1
 
     async def test_stop_during_the_handshake_closes_without_going_offline(
         self, server, osrm, clock
@@ -1057,6 +1059,66 @@ class TestFlakyDrop:
         assert goodbye.sent_types() == ["auth", "go_offline"]
         assert goodbye.closed_with == 1000
         assert server.status == "offline"
+        assert bot.stats.left_online == 0
+
+    async def test_failed_goodbye_is_counted_and_logged(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s, caplog
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)  # dropped at ~30, away for 10 s
+        server.refuse_connections = 1
+
+        bot.stop()
+        await task
+
+        assert bot.stats.left_online == 1
+        assert "could not go offline after the stop" in caplog.text
+
+    async def test_goodbye_to_a_server_that_never_answers_is_bounded(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)
+        server.hang_connections = True  # the goodbye connection never opens
+        stopped_at = clock.elapsed
+
+        bot.stop()
+        await task
+
+        # The deadline fired, within the runner's stop budget (SHUTDOWN_TIMEOUT_S + 2).
+        assert clock.elapsed - stopped_at == pytest.approx(GOODBYE_TIMEOUT_S, abs=0.1)
+        assert GOODBYE_TIMEOUT_S < config.SHUTDOWN_TIMEOUT_S + 2
+        assert bot.stats.left_online == 1
+
+    async def test_goodbye_refused_for_good_counts_as_left_online(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)
+        server.close_after_auth = 4409  # another connection took the driver meanwhile
+
+        bot.stop()
+        await task
+
+        assert bot.stats.left_online == 1
+        assert bot.stop_reason is None
+
+    async def test_bug_in_the_goodbye_is_not_swallowed(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)
+        server.handle = lambda connection, message: 1 / 0  # a bug on our side
+
+        bot.stop()
+
+        with pytest.raises(ZeroDivisionError):
+            await task
+        assert bot.stats.left_online == 0
 
 
 class TestFlakySilence:

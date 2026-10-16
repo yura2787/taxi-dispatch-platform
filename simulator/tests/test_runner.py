@@ -11,7 +11,7 @@ import pytest
 
 from sim import config, runner
 from sim.driver_bot import BotStats
-from sim.runner import RunOptions, flaky_ids, strict_failures
+from sim.runner import RunOptions, flaky_ids, server_failures, strict_failures
 from sim.server_metrics import ServerMetricsUnavailable, Snapshot
 from tests.conftest import FakeServer
 
@@ -248,13 +248,141 @@ class TestStrict:
 
         assert result.failures == [f"server errors caused by the bots: {{'{code}': 1}}"]
 
-    def test_not_online_after_the_reaper_is_not_a_failure(self):
-        stats = BotStats(went_online=True, errors=Counter(not_online=3))
-        bot = SimpleNamespace(stats=stats, stop_reason=None)
+    def test_not_online_of_silent_flaky_bots_is_not_a_failure(self):
+        bot = bot_view(errors=Counter(not_online=3), flaky=True)
 
         failures = strict_failures([bot])
 
         assert failures == []
+
+    def test_not_online_without_flaky_bots_is_a_failure(self):
+        # Nobody falls silent: the reaper had no reason to take a bot offline.
+        bot = bot_view(errors=Counter(not_online=1))
+
+        failures = strict_failures([bot])
+
+        assert failures == ["server errors caused by the bots: {'not_online': 1}"]
+
+    @pytest.mark.parametrize(
+        ("stats", "failure"),
+        [
+            ({"closes": Counter({1011: 2})}, "connections closed by the server: {1011: 2}"),
+            ({"connect_failures": 1}, "failed connections: 1, handshake timeouts: 0"),
+            ({"handshake_timeouts": 1}, "failed connections: 0, handshake timeouts: 1"),
+            ({"unknown_messages": 3}, "unknown messages from the server: 3"),
+            ({"left_online": 1}, "1 bots may be left online after the stop"),
+        ],
+        ids=["closes", "connect_failures", "handshake_timeouts", "unknown_messages", "left"],
+    )
+    def test_anything_the_server_closed_or_did_not_answer_is_a_failure(self, stats, failure):
+        bot = bot_view(flaky=True, **stats)
+
+        failures = strict_failures([bot])
+
+        assert failures == [failure]
+
+    def test_clean_bot_has_no_failures(self):
+        failures = strict_failures([bot_view(locations_sent=100)])
+
+        assert failures == []
+
+
+def bot_view(*, flaky: bool = False, **stats) -> SimpleNamespace:
+    """What the strict checks read from a bot that started and got online."""
+    return SimpleNamespace(
+        stats=BotStats(started=True, went_online=True, **stats), stop_reason=None, flaky=flaky
+    )
+
+
+class TestServerFailures:
+    def test_clean_change_has_no_failures(self):
+        change = Snapshot(updates={"accepted": 10})
+
+        failures = server_failures(change, [bot_view(locations_sent=10)])
+
+        assert failures == []
+
+    def test_refused_points_are_a_failure(self):
+        change = Snapshot(updates={"accepted": 8, "rejected_jump": 1, "rejected_offline": 1})
+
+        failures = server_failures(change, [bot_view(locations_sent=10)])
+
+        assert failures == [
+            "points refused by the server: {'rejected_jump': 1, 'rejected_offline': 1}"
+        ]
+
+    def test_offline_points_of_silent_flaky_bots_are_not_a_failure(self):
+        change = Snapshot(updates={"accepted": 9, "rejected_offline": 1})
+
+        failures = server_failures(change, [bot_view(locations_sent=10, flaky=True)])
+
+        assert failures == []
+
+    def test_drivers_closed_by_the_server_are_a_failure(self):
+        change = Snapshot(updates={"accepted": 10}, closes={"1011": 2, "4409": 0})
+
+        failures = server_failures(change, [bot_view(locations_sent=10)])
+
+        assert failures == ["drivers closed by the server: {'1011': 2}"]
+
+    def test_points_that_never_reached_the_server_are_a_failure(self):
+        change = Snapshot(updates={"accepted": 7})
+
+        failures = server_failures(change, [bot_view(locations_sent=10)])
+
+        assert failures == ["3 points sent by the bots never reached the server"]
+
+    @pytest.mark.parametrize(
+        ("lost_with", "stats", "cancelled"),
+        [
+            ("drops", {"drops": 2}, 0),
+            ("reconnects", {"reconnects": 2}, 0),
+            ("cancelled", {}, 2),
+        ],
+        ids=["drops", "reconnects", "cancelled"],
+    )
+    def test_points_lost_with_ended_connections_are_tolerated_up_to_one_each(
+        self, lost_with, stats, cancelled
+    ):
+        # A connection ending without a goodbye may take the points in its socket.
+        bot = bot_view(locations_sent=10, **stats)
+
+        exactly_at_the_limit = server_failures(
+            Snapshot(updates={"accepted": 8}), [bot], cancelled=cancelled
+        )
+        one_more = server_failures(Snapshot(updates={"accepted": 7}), [bot], cancelled=cancelled)
+
+        assert exactly_at_the_limit == []
+        assert one_more == ["3 points sent by the bots never reached the server"]
+
+    def test_points_of_other_clients_can_hide_lost_points(self):
+        # A known blind spot: the server counts every client, e.g. a developer's
+        # browser during the run, so the surplus covers points the bots lost.
+        change = Snapshot(updates={"accepted": 15})
+
+        failures = server_failures(change, [bot_view(locations_sent=10)])
+
+        assert failures == []
+
+    def test_several_failures_are_all_reported(self):
+        change = Snapshot(updates={"accepted": 0, "rejected_jump": 1}, closes={"1011": 1})
+
+        failures = server_failures(change, [bot_view(locations_sent=5)])
+
+        assert failures == [
+            "the server accepted no points",
+            "points refused by the server: {'rejected_jump': 1}",
+            "drivers closed by the server: {'1011': 1}",
+            "4 points sent by the bots never reached the server",
+        ]
+
+    def test_flaky_share_that_rounds_to_no_flaky_bot_is_strict(self):
+        # --flaky-share 0.2 with 2 bots: no bot is flaky, so nothing is tolerated.
+        change = Snapshot(updates={"accepted": 9, "rejected_offline": 1})
+
+        failures = server_failures(change, [bot_view(locations_sent=10, flaky=False)])
+
+        assert failures == ["points refused by the server: {'rejected_offline': 1}"]
 
 
 class TestServerMetrics:
@@ -276,7 +404,7 @@ class TestServerMetrics:
             city, osrm, clock, drivers=1, duration_s=10, metrics=nothing_accepted
         )
 
-        assert result.failures == ["the server accepted no points"]
+        assert "the server accepted no points" in result.failures
 
     @pytest.mark.parametrize("down_at", [frozenset({1}), frozenset({2})], ids=["before", "after"])
     async def test_unavailable_metrics_are_reported_and_fail_a_strict_run(

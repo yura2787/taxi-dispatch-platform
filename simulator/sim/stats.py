@@ -49,6 +49,7 @@ class Totals:
     breaks: int = 0
     drops: int = 0
     silences: int = 0
+    left_online: int = 0
     rtt_s: list[float] = field(default_factory=list)
     never_online: int = 0
     stopped: Counter[str] = field(default_factory=Counter)
@@ -74,6 +75,7 @@ class Totals:
         self.breaks += stats.breaks
         self.drops += stats.drops
         self.silences += stats.silences
+        self.left_online += stats.left_online
         self.rtt_s.extend(stats.rtt_s)
         self.never_online += stats.started and not stats.went_online
 
@@ -160,5 +162,5 @@ def summary(
         f"unknown messages: {totals.unknown_messages}",
         f"breaks: {totals.breaks}, drops: {totals.drops}, silences: {totals.silences}",
         f"never online: {totals.never_online}, stopped bots: {_counts(totals.stopped)}, "
-        f"cancelled at the stop: {cancelled}",
+        f"cancelled at the stop: {cancelled}, left online at the stop: {totals.left_online}",
     ]
