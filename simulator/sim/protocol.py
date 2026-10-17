@@ -6,6 +6,7 @@ codes into what a bot must do about them. Every message is {"type": ..., "data":
 
 import enum
 import json
+import logging
 from dataclasses import dataclass
 
 from sim.geo import Point
@@ -123,20 +124,34 @@ class CloseVerdict(enum.Enum):
     RECONNECT = "reconnect"
 
 
-_CLOSE_VERDICTS = {
-    4401: CloseVerdict.FATAL,  # invalid token
-    4403: CloseVerdict.FATAL,  # no driver profile, not eligible
+@dataclass(frozen=True)
+class CloseRule:
+    """What a bot does about a close code and how loudly it says so."""
+
+    verdict: CloseVerdict
+    log_level: int
+    # Appended to the log line: how to fix it, or whose fault it is.
+    hint: str = ""
+
+
+_CLOSE_RULES = {
+    4401: CloseRule(CloseVerdict.FATAL, logging.ERROR),  # invalid token
+    # No driver profile, or not eligible.
+    4403: CloseRule(CloseVerdict.FATAL, logging.ERROR, "run make seed-drivers"),
     # Another connection of this driver took over; reconnecting would push it out in
     # turn, and two runs (or a bot and a browser tab) would fight forever.
-    4409: CloseVerdict.FATAL,
-    1008: CloseVerdict.BUG,  # rate limit broken systematically
-    1009: CloseVerdict.BUG,  # message too big
+    4409: CloseRule(CloseVerdict.FATAL, logging.WARNING),
+    # Rate limit broken systematically, message too big.
+    1008: CloseRule(CloseVerdict.BUG, logging.ERROR, "simulator bug"),
+    1009: CloseRule(CloseVerdict.BUG, logging.ERROR, "simulator bug"),
 }
 
+_RECONNECT = CloseRule(CloseVerdict.RECONNECT, logging.WARNING)
 
-def classify_close(code: int | None) -> CloseVerdict:
+
+def close_rule(code: int | None) -> CloseRule:
     """4000, 4408, 1011, 1001, 1006 and anything unknown mean: reconnect."""
-    return _CLOSE_VERDICTS.get(code, CloseVerdict.RECONNECT)
+    return _CLOSE_RULES.get(code, _RECONNECT)
 
 
 class ErrorVerdict(enum.Enum):

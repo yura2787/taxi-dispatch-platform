@@ -87,8 +87,23 @@ RECONNECT_MAX_S = 30
 # (the server itself gives auth WS_AUTH_TIMEOUT_S = 5 s).
 CONNECT_TIMEOUT_S = 5
 
+# How long close() waits for the server's close frame before dropping the connection.
+CLOSE_TIMEOUT_S = 1
+
+
+# --- Stop (ТЗ 08, 5.7) ---
 # On stop, an online bot waits this long for the snapshot after go_offline.
 SHUTDOWN_TIMEOUT_S = 5
+
+# Everything a bot does after the stop fits in this, counted from the stop: go_offline,
+# its snapshot and the close, or a goodbye connection instead; each step gets what
+# the previous ones left. Then the bot gives up (left_online) and ends by itself.
+BOT_STOP_BUDGET_S = SHUTDOWN_TIMEOUT_S + CLOSE_TIMEOUT_S
+
+# The runner waits this long for the bots after the stop (5.7: SHUTDOWN_TIMEOUT_S + 2),
+# then cancels the rest. The second above the bots' own budget is for an event loop
+# busy with 1000 bots: a bot is either done (maybe left online) or cancelled, not both.
+STOP_BUDGET_S = BOT_STOP_BUDGET_S + 1
 
 
 # --- Reporting ---

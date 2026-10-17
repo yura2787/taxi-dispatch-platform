@@ -2,6 +2,7 @@
 the bot does about each close code and error code (ТЗ 08, section 5.4)."""
 
 import json
+import logging
 
 import pytest
 
@@ -109,27 +110,36 @@ class TestServerMessages:
         assert message == UnknownMessage(type=message_type)
 
 
-class TestCloseVerdicts:
+class TestCloseRules:
     @pytest.mark.parametrize(
-        ("code", "verdict"),
+        ("code", "verdict", "level"),
         [
-            (4401, CloseVerdict.FATAL),
-            (4403, CloseVerdict.FATAL),
-            (4409, CloseVerdict.FATAL),
-            (1008, CloseVerdict.BUG),
-            (1009, CloseVerdict.BUG),
-            (4000, CloseVerdict.RECONNECT),
-            (4408, CloseVerdict.RECONNECT),
-            (1011, CloseVerdict.RECONNECT),
-            (1001, CloseVerdict.RECONNECT),
-            (1006, CloseVerdict.RECONNECT),
-            (None, CloseVerdict.RECONNECT),
-            (4999, CloseVerdict.RECONNECT),
+            (4401, CloseVerdict.FATAL, logging.ERROR),
+            (4403, CloseVerdict.FATAL, logging.ERROR),
+            (4409, CloseVerdict.FATAL, logging.WARNING),
+            (1008, CloseVerdict.BUG, logging.ERROR),
+            (1009, CloseVerdict.BUG, logging.ERROR),
+            (4000, CloseVerdict.RECONNECT, logging.WARNING),
+            (4408, CloseVerdict.RECONNECT, logging.WARNING),
+            (1011, CloseVerdict.RECONNECT, logging.WARNING),
+            (1001, CloseVerdict.RECONNECT, logging.WARNING),
+            (1006, CloseVerdict.RECONNECT, logging.WARNING),
+            (None, CloseVerdict.RECONNECT, logging.WARNING),
+            (4999, CloseVerdict.RECONNECT, logging.WARNING),
         ],
         ids=str,
     )
-    def test_close_code(self, code, verdict):
-        assert protocol.classify_close(code) is verdict
+    def test_close_code_has_a_verdict_and_a_log_level(self, code, verdict, level):
+        rule = protocol.close_rule(code)
+
+        assert (rule.verdict, rule.log_level) == (verdict, level)
+
+    def test_missing_profile_tells_how_to_fix_it(self):
+        assert "make seed-drivers" in protocol.close_rule(4403).hint
+
+    @pytest.mark.parametrize("code", [1008, 1009])
+    def test_protocol_breach_is_marked_as_a_simulator_bug(self, code):
+        assert "simulator bug" in protocol.close_rule(code).hint
 
 
 class TestErrorVerdicts:

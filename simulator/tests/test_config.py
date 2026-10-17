@@ -39,6 +39,15 @@ class TestServerLimits:
         assert max(config.SPEED_KMH) < config.SERVER_MAX_SPEED_KMH / 2
 
 
+class TestStopBudget:
+    def test_runner_waits_for_the_bots_as_long_as_the_spec_says(self):
+        assert config.STOP_BUDGET_S == config.SHUTDOWN_TIMEOUT_S + 2
+
+    def test_bot_finishes_its_stop_before_the_runner_cancels_it(self):
+        # Otherwise one bot could be counted both as left online and as cancelled.
+        assert config.BOT_STOP_BUDGET_S < config.STOP_BUDGET_S
+
+
 class TestAreas:
     def test_city_area_lies_at_least_1_km_inside_the_service_area(self):
         assert margin_m(config.CITY_AREA, config.SERVICE_AREA) >= 1000

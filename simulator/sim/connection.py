@@ -11,9 +11,6 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from sim import config
 
-# How long close() waits for the server's close frame before dropping the connection.
-CLOSE_TIMEOUT_S = 2
-
 
 class Closed(Exception):
     """The connection is closed; `code` is None if it dropped without a close frame."""
@@ -79,7 +76,7 @@ async def open_connection(url: str) -> Connection:
             # that measure the server. The server's pings are still answered.
             ping_interval=None,
             # A server that does not answer the close frame is not waited for long.
-            close_timeout=CLOSE_TIMEOUT_S,
+            close_timeout=config.CLOSE_TIMEOUT_S,
             # Messages are ~150 bytes: compression would only cost CPU for 1000 bots.
             compression=None,
         )

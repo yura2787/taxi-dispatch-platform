@@ -10,10 +10,10 @@ import pytest
 
 from sim import config, driver_bot
 from sim.connection import Closed, ConnectFailed
-from sim.driver_bot import GOODBYE_TIMEOUT_S, Misbehaviour, _next_slot, reconnect_delay
+from sim.driver_bot import Misbehaviour, _next_slot, reconnect_delay
 from sim.geo import Point, haversine_m
 from sim.osrm import NoRoute, OsrmUnavailable
-from tests.conftest import FakeClock, FakeOsrm, FakeServer
+from tests.conftest import FakeClock, FakeConnection, FakeOsrm, FakeServer
 from tests.factories import CENTRE, make_bot
 
 FAR_AWAY = Point(50.4501, 30.5234)  # Kyiv: outside the service area
@@ -783,7 +783,9 @@ class TestShutdown:
         assert server.status == "offline"
         assert bot.connected is False
 
-    async def test_without_an_answer_closes_after_the_timeout(self, server, osrm, clock):
+    async def test_without_an_answer_drops_the_connection_after_the_timeout(
+        self, server, osrm, clock
+    ):
         server.silent.add("go_offline")
         bot = make_bot(server=server, osrm=osrm, clock=clock)
         task = asyncio.create_task(bot.run())
@@ -793,10 +795,72 @@ class TestShutdown:
         bot.stop()
         await task
 
-        assert server.connections[0].closed_with == 1000
+        # A server that does not answer go_offline would not answer the close frame
+        # either: the bot does not wait for it.
+        connection = server.connections[0]
+        assert (connection.aborted, connection.closed_with) == (True, None)
         assert clock.elapsed - stopped_at == pytest.approx(config.SHUTDOWN_TIMEOUT_S, abs=0.1)
         # Not confirmed: the server may hold the driver online until the reaper.
         assert bot.stats.left_online == 1
+
+    async def test_shutdown_and_goodbye_share_one_stop_budget(self, server, osrm, clock):
+        server.silent.add("go_offline")
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        stopped_at = clock.elapsed
+        bot.stop()
+        await clock.sleep(4)  # most of the budget waiting for the snapshot
+
+        server.hang_connections = True  # the goodbye connection never opens
+        server.connections[0].drop(1001)
+        await task
+
+        # Only what was left of the budget for the goodbye, not a budget of its own.
+        assert clock.elapsed - stopped_at == pytest.approx(config.BOT_STOP_BUDGET_S, abs=0.1)
+        assert bot.stats.left_online == 1
+
+    async def test_late_shutdown_still_leaves_time_for_the_close(self, server, osrm, clock):
+        server.silent.add("go_offline")
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        stopped_at = clock.elapsed
+
+        bot.stop()
+        clock.advance(3)  # the bot notices the stop late (a busy event loop)
+        await task
+
+        # It waits for the snapshot only as long as leaves CLOSE_TIMEOUT_S of the budget.
+        expected = config.BOT_STOP_BUDGET_S - config.CLOSE_TIMEOUT_S
+        assert clock.elapsed - stopped_at == pytest.approx(expected, abs=0.1)
+        assert server.connections[0].aborted is True
+
+    async def test_no_goodbye_once_the_stop_budget_is_spent(
+        self, server, osrm, clock, monkeypatch, caplog
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        connect = server.connect
+
+        async def slow_connect():
+            await clock.sleep(config.BOT_STOP_BUDGET_S + 1)  # a busy event loop
+            return await connect()
+
+        monkeypatch.setattr(bot, "_connect", slow_connect)
+        # The slow reconnect is closed right after its auth: no offline confirmed.
+        server.close_after_auth = 1011
+        server.connections[0].drop(1011)  # online on the server (W4), reconnecting
+        # The first reconnect delay is below 1 s: the slow connect is under way.
+        await clock.sleep(1)
+
+        bot.stop()
+        await task
+
+        assert len(server.connections) == 2  # the slow reconnect, no goodbye after it
+        assert bot.stats.left_online == 1
+        assert "no time left" in caplog.text
 
     async def test_stop_during_the_handshake_closes_without_going_offline(
         self, server, osrm, clock
@@ -1305,9 +1369,8 @@ class TestFlakyDrop:
         bot.stop()
         await task
 
-        # The deadline fired, within the runner's stop budget (SHUTDOWN_TIMEOUT_S + 2).
-        assert clock.elapsed - stopped_at == pytest.approx(GOODBYE_TIMEOUT_S, abs=0.1)
-        assert GOODBYE_TIMEOUT_S < config.SHUTDOWN_TIMEOUT_S + 2
+        # The bot's own stop budget ran out, before the runner would cancel it.
+        assert clock.elapsed - stopped_at == pytest.approx(config.BOT_STOP_BUDGET_S, abs=0.1)
         assert bot.stats.left_online == 1
 
     async def test_goodbye_refused_for_good_counts_as_left_online(
@@ -1359,6 +1422,24 @@ class TestFlakyDrop:
 
         assert bot.stats.left_online == 1
         assert bot.stats.closes[1011] == 1
+
+    async def test_goodbye_confirmed_offline_but_slow_to_close_is_not_left_online(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)
+
+        async def slow_close(connection, code):
+            await clock.sleep(config.BOT_STOP_BUDGET_S)  # outlasts the deadline
+
+        monkeypatch.setattr(FakeConnection, "close", slow_close)
+
+        bot.stop()
+        await task
+
+        assert server.status == "offline"
+        assert bot.stats.left_online == 0
 
     async def test_bug_in_the_goodbye_is_not_swallowed(
         self, server, osrm, clock, monkeypatch, flaky_every_30_s

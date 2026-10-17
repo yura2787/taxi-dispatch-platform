@@ -126,7 +126,7 @@ async def run(
         for bot in bots:
             bot.stop()
         try:
-            cancelled = await _wait_or_cancel(tasks, clock, config.SHUTDOWN_TIMEOUT_S + 2)
+            cancelled = await _wait_or_cancel(tasks, clock, config.STOP_BUDGET_S)
         finally:
             # Also when the run itself is cancelled meanwhile (a second Ctrl+C):
             # nothing the run started may outlive it.

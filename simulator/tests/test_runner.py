@@ -136,7 +136,7 @@ class TestStop:
 
         result = await simulate(city, osrm, clock, drivers=2, ramp_up_s=0, duration_s=10)
 
-        assert clock.elapsed - started == pytest.approx(10 + config.SHUTDOWN_TIMEOUT_S + 2, abs=0.1)
+        assert clock.elapsed - started == pytest.approx(10 + config.STOP_BUDGET_S, abs=0.1)
         assert "1 bots did not stop" in caplog.text
         assert result.cancelled == 1
         assert "1 bots did not stop in time" in result.failures

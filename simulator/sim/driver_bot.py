@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import enum
 import logging
+import math
 import random
 from collections import Counter
 from collections.abc import Awaitable, Callable
@@ -44,16 +45,6 @@ BUSY_STATUSES = frozenset({"offered", "on_trip"})
 
 # Share of drops among the misbehaviours of a flaky bot; the rest fall silent.
 DROP_SHARE = 0.5
-
-# The goodbye connection after a stop: within the runner's stop budget, which is
-# SHUTDOWN_TIMEOUT_S + 2.
-GOODBYE_TIMEOUT_S = config.SHUTDOWN_TIMEOUT_S + 1
-
-_STOP_LOG_LEVEL = {
-    4401: logging.ERROR,
-    4403: logging.ERROR,
-    4409: logging.WARNING,
-}
 
 
 class BotStopped(Exception):
@@ -188,6 +179,8 @@ class DriverBot:
         self._car: Car | None = None
         self._drive_task: asyncio.Task[None] | None = None
         self._stopping = asyncio.Event()
+        # Monotonic moment by which everything after the stop must be done.
+        self._stop_deadline = math.inf
         self._snapshot_received = asyncio.Event()
         self._online = asyncio.Event()
         self._offline = asyncio.Event()
@@ -218,8 +211,15 @@ class DriverBot:
         return self._car.where(self._clock.monotonic())[0]
 
     def stop(self) -> None:
-        """Ask the bot to go offline and leave; run() returns when it has."""
+        """Ask the bot to go offline and leave; run() returns when it has, at most
+        BOT_STOP_BUDGET_S later."""
+        if not self._stopping.is_set():
+            self._stop_deadline = self._clock.monotonic() + config.BOT_STOP_BUDGET_S
         self._stopping.set()
+
+    def _time_left(self) -> float:
+        """Seconds left of the stop budget."""
+        return self._stop_deadline - self._clock.monotonic()
 
     async def run(self) -> None:
         try:
@@ -268,10 +268,13 @@ class DriverBot:
         no bot may be left in drivers:last_seen (5.7)."""
         if not self._may_be_online:
             return
-        # Bounded, so a slow or absent server never exceeds the runner's stop budget
-        # (SHUTDOWN_TIMEOUT_S + 2); the budget covers connect, auth and go_offline.
+        # Whatever the stop has left of its budget (a shutdown may have used most of
+        # it), so a slow or absent server never keeps the runner waiting.
+        if self._time_left() <= 0:
+            self._left_online("no time left to go offline after the stop")
+            return
         goodbye = asyncio.create_task(self._session(goodbye=True))
-        deadline = asyncio.create_task(self._clock.sleep(GOODBYE_TIMEOUT_S))
+        deadline = asyncio.create_task(self._clock.sleep(self._time_left()))
         try:
             await asyncio.wait({goodbye, deadline}, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -280,16 +283,21 @@ class DriverBot:
             outcome, _ = await asyncio.gather(goodbye, deadline, return_exceptions=True)
         if isinstance(outcome, Closed):
             self._count_close(outcome.code)
-        if isinstance(outcome, asyncio.CancelledError):
-            self._left_online("could not go offline after the stop (timed out)")
-        elif isinstance(outcome, _GOODBYE_FAILURES):
-            self._left_online(f"could not go offline after the stop ({outcome!r})")
-        elif outcome is not None:
+        if outcome is not None and not isinstance(
+            outcome, (asyncio.CancelledError, *_GOODBYE_FAILURES)
+        ):
             raise outcome  # a bug, not the server: keep its traceback
-        elif self._may_be_online:
-            # The session ended quietly, but without an "offline": closed by the
-            # server while waiting for it.
-            self._left_online("could not go offline after the stop (closed)")
+        # Only what the server said counts: an "offline" may have come before the
+        # deadline cut a slow close short, and a session may end quietly without one
+        # (closed by the server while waiting for it).
+        if self._may_be_online:
+            if isinstance(outcome, asyncio.CancelledError):
+                why = "timed out"
+            elif outcome is None:
+                why = "closed"
+            else:
+                why = repr(outcome)
+            self._left_online(f"could not go offline after the stop ({why})")
 
     def _left_online(self, why: str) -> None:
         """Give up going offline: counted once, and no further goodbye is tried."""
@@ -555,14 +563,18 @@ class DriverBot:
                 # sent when the break began, or on the snapshot of a reconnect.
                 if not self.on_break:
                     await conn.send(protocol.go_offline())
-                result = await self._wait(
-                    receiver, seconds=config.SHUTDOWN_TIMEOUT_S, event=self._offline
-                )
+                # The close after it must still fit in the stop budget.
+                seconds = min(config.SHUTDOWN_TIMEOUT_S, self._time_left() - config.CLOSE_TIMEOUT_S)
+                result = await self._wait(receiver, seconds=seconds, event=self._offline)
                 if result == "timeout":
                     self._left_online("go_offline not confirmed")
+                    # A server that does not answer go_offline would not answer the
+                    # close frame either: drop the connection instead of waiting.
+                    conn.abort()
+                    return
             await conn.close(1000)
         except Closed as exc:
-            if protocol.classify_close(exc.code) is not CloseVerdict.RECONNECT:
+            if protocol.close_rule(exc.code).verdict is not CloseVerdict.RECONNECT:
                 # Closed for good: a goodbye would be refused or, after 4409, take
                 # the driver offline from the connection that has taken it over.
                 self._on_closed(exc.code)  # counts, logs and raises BotStopped
@@ -639,19 +651,14 @@ class DriverBot:
     def _on_closed(self, code: int | None) -> None:
         """Count the close; raise BotStopped unless the bot should reconnect."""
         code = self._count_close(code)
-        match protocol.classify_close(code):
-            case CloseVerdict.FATAL:
-                level = _STOP_LOG_LEVEL[code]
-                hint = ": run make seed-drivers" if code == 4403 else ""
-                logger.log(
-                    level, "driver %d: closed with %d, stopping%s", self.driver_id, code, hint
-                )
-                raise BotStopped(f"closed {code}")
-            case CloseVerdict.BUG:
-                logger.error("driver %d: closed with %d (simulator bug)", self.driver_id, code)
-                raise BotStopped(f"closed {code}")
-            case CloseVerdict.RECONNECT:
-                logger.warning("driver %d: closed with %d, reconnecting", self.driver_id, code)
+        rule = protocol.close_rule(code)
+        action = "reconnecting" if rule.verdict is CloseVerdict.RECONNECT else "stopping"
+        hint = f" ({rule.hint})" if rule.hint else ""
+        logger.log(
+            rule.log_level, "driver %d: closed with %d, %s%s", self.driver_id, code, action, hint
+        )
+        if rule.verdict is not CloseVerdict.RECONNECT:
+            raise BotStopped(f"closed {code}")
 
     def _count_close(self, code: int | None) -> int:
         """Count a close by the server; a connection lost without a frame is 1006."""
