@@ -1,0 +1,9 @@
+# Load test mode of realtime, used only by `make loadtest`:
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d realtime
+# The same command as in docker-compose.yml, but without --reload: the reloader
+# watches the source tree in a separate process and restarts the server on changes,
+# which costs CPU and could restart it mid-run, skewing the measurements.
+services:
+  realtime:
+    # --ws-max-size: keep in sync with WS_MAX_MESSAGE_BYTES in realtime/app/config.py.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --ws-max-size 4096

@@ -1,6 +1,6 @@
 """Developer commands for local data.
 
-    python -m app.devtools seed-drivers --count 100
+    python -m app.devtools seed-drivers --count 100 [--first-id 1]
 
 Driver profiles come from Django from stage 2 on; until then this command writes
 them to Redis so drivers can connect with dev tokens. It refuses to run without
@@ -51,10 +51,14 @@ def build_profile(driver_id: int) -> dict[str, str | int | float]:
     }
 
 
-async def seed_drivers(redis: Redis, count: int) -> None:
-    """Write profiles of drivers 1..count; existing ones are overwritten with the same data."""
+async def seed_drivers(redis: Redis, count: int, *, first_id: int = 1) -> None:
+    """Write profiles of drivers first_id..first_id + count - 1.
+
+    Existing profiles are overwritten with the same data. Separate id ranges let two
+    simulator runs coexist instead of pushing each other's drivers out with 4409.
+    """
     async with redis.pipeline(transaction=False) as pipe:
-        for driver_id in range(1, count + 1):
+        for driver_id in range(first_id, first_id + count):
             pipe.hset(redis_keys.driver_profile(driver_id), mapping=build_profile(driver_id))
         await pipe.execute()
 
@@ -66,10 +70,10 @@ def _positive_int(value: str) -> int:
     return number
 
 
-async def _seed(count: int) -> None:
+async def _seed(count: int, first_id: int) -> None:
     redis = Redis.from_url(config.REDIS_URL)
     try:
-        await seed_drivers(redis, count)
+        await seed_drivers(redis, count, first_id=first_id)
     finally:
         await redis.aclose()
 
@@ -77,15 +81,17 @@ async def _seed(count: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.devtools")
     commands = parser.add_subparsers(dest="command", required=True)
-    seed = commands.add_parser("seed-drivers", help="create dev driver profiles 1..N")
-    seed.add_argument("--count", type=_positive_int, default=100)
+    seed = commands.add_parser("seed-drivers", help="create dev driver profiles")
+    seed.add_argument("--count", type=_positive_int, default=100, help="number of drivers")
+    seed.add_argument("--first-id", type=_positive_int, default=1, help="id of the first driver")
     args = parser.parse_args(argv)
 
     if not config.DEV_AUTH:
         print("Refusing to seed: dev data is allowed only with DEV_AUTH=1.", file=sys.stderr)
         return 1
-    asyncio.run(_seed(args.count))
-    print(f"Seeded {args.count} driver profiles.")
+    asyncio.run(_seed(args.count, args.first_id))
+    last_id = args.first_id + args.count - 1
+    print(f"Seeded {args.count} driver profiles (ids {args.first_id}..{last_id}).")
     return 0
 
 

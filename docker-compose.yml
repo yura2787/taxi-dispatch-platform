@@ -97,6 +97,27 @@ services:
       retries: 5
       start_period: 10s
 
+  # Driver bots for a live city and load tests.
+  # Only in the sim profile, so `make up` does not start it.
+  simulator:
+    build: ./simulator
+    profiles: [sim]
+    environment:
+      REALTIME_WS_URL: ws://nginx/rt/ws/driver
+      OSRM_URL: http://osrm:5000
+      REALTIME_METRICS_URL: http://realtime:8001/rt/metrics
+    volumes:
+      - ./simulator:/app
+    # One socket per bot: 1000 bots do not fit into the default limit of 1024.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # No depends_on osrm: it is optional for the stack, `make sim` checks the graph.
+    depends_on:
+      - nginx
+      - realtime
+
   # --- Graph preparation tools, used only by infra/osrm/prepare.sh (`make osrm`) ---
   osrm-prepare:
     image: *osrm-image

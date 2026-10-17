@@ -1,21 +1,22 @@
 codecov:
   notify:
-    # Every commit uploads 3 reports (core-tests, realtime-tests, osrm-tests).
-    # Without this, statuses are computed from the first one, and the missing
-    # services look like a coverage drop until the rest arrive.
-    after_n_builds: 3
+    # Every commit uploads 4 reports (core-tests, realtime-tests, osrm-tests,
+    # simulator-tests). Without this, statuses are computed from the first one, and
+    # the missing services look like a coverage drop until the rest arrive.
+    after_n_builds: 4
 
 comment:
-  after_n_builds: 3
+  after_n_builds: 4
 
 coverage:
   status:
-    # The lines a pull request adds or changes must be covered by tests.
+    # At least 70 % of the lines a pull request adds or changes must be covered,
+    # with 2 % of slack.
     patch:
       default:
         target: 70%
         threshold: 2%
-    # Overall coverage may drift a little, but cannot quietly fall.
+    # Overall coverage may fall by at most 2 % against the base commit.
     project:
       default:
         target: auto
@@ -28,6 +29,7 @@ fixes:
   - "apps/::core/apps/"
   - "conftest.py::core/conftest.py"
   - "app/::realtime/app/"
+  - "sim/::simulator/sim/"
 
 # One flag per service, so each has its own coverage on codecov.io. Reports with
 # the same flag are merged: realtime is uploaded by both the unit and OSRM jobs.
@@ -38,3 +40,6 @@ flags:
   realtime:
     paths:
       - realtime/
+  simulator:
+    paths:
+      - simulator/

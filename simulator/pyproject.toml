@@ -1,0 +1,39 @@
+[project]
+name = "rideflow-simulator"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.28,<0.29",
+    "prometheus-client>=0.26,<1",
+    "websockets>=17.2,<18",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1,<10",
+    "pytest-asyncio>=1.4,<2",
+    "pytest-cov>=7.1,<8",
+]
+
+[tool.pytest.ini_options]
+# Coverage on every run, so a gap shows up while the code is still fresh
+# instead of on the pull request.
+# --cov=. (not --cov=sim): report paths then start with the package
+# (sim/config.py, not config.py), so Codecov can tell files apart.
+addopts = "--cov=. --cov-report=term-missing"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+python_files = ["test_*.py"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = [
+    # Only the simulator code is measured; --cov=. would otherwise add the tests.
+    "tests/*",
+]
+
+[tool.coverage.report]
+exclude_also = [
+    # Entry point of `python -m sim`: tests call main() directly.
+    'if __name__ == "__main__":',
+]
