@@ -58,6 +58,11 @@ class FakeClock(Clock):
     def monotonic(self) -> float:
         return 1_000.0 + self.elapsed
 
+    @property
+    def scheduler(self) -> "asyncio.Task[None] | None":
+        """The task that moves the time; it lives while anybody sleeps."""
+        return self._scheduler
+
     def advance(self, seconds: float) -> None:
         """Move the time without sleeping, e.g. between two messages of a test."""
         self.elapsed += seconds

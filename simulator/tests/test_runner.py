@@ -142,6 +142,70 @@ class TestStop:
         assert "1 bots did not stop in time" in result.failures
         assert "cancelled at the stop: 1" in result.report[-1]
 
+    async def test_bots_that_stop_in_time_are_not_counted_as_cancelled(self, city, osrm, clock):
+        result = await simulate(city, osrm, clock, drivers=20, ramp_up_s=0, duration_s=10)
+
+        assert result.cancelled == 0
+        assert "cancelled at the stop: 0" in result.report[-1]
+
+    @pytest.mark.parametrize("cancels", [1, 2], ids=["second_ctrl_c", "third_ctrl_c"])
+    async def test_run_cancelled_while_stopping_leaves_no_task_behind(
+        self, city, osrm, clock, cancels
+    ):
+        # Another Ctrl+C cancels the run while the bots still wait for go_offline.
+        for driver_id in (1, 2, 3):
+            city.server(driver_id).silent.add("go_offline")
+        stop = asyncio.Event()
+        run = asyncio.create_task(simulate(city, osrm, clock, stop=stop, drivers=3, ramp_up_s=0))
+        await clock.sleep(10)
+        stop.set()
+        await clock.sleep(1)  # the bots have sent go_offline and wait for the answer
+        before = asyncio.all_tasks() - {asyncio.current_task(), run}
+
+        for _ in range(cancels):
+            run.cancel()
+            await asyncio.sleep(0)
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+        # Everything the run started is finished, not left for asyncio.run to reap;
+        # only the virtual clock's own scheduler may still be there.
+        left = {task for task in before if not task.done()}
+        assert left <= {clock.scheduler}
+        assert all(server.connections[-1].aborted for server in city.servers.values())
+
+
+class TestHelperCrashes:
+    async def test_crash_of_the_status_line_is_logged_at_once_and_fails_the_run(
+        self, city, osrm, clock, monkeypatch, caplog
+    ):
+        calls = []
+
+        def broken_render(self, bots, loop_lag_s, now):
+            calls.append(now)
+            if len(calls) > 1:  # the baseline at the start works, the first line breaks
+                raise ZeroDivisionError("bug")
+            return ""
+
+        monkeypatch.setattr(runner.StatusLine, "render", broken_render)
+
+        result = await simulate(city, osrm, clock, drivers=1, duration_s=30)
+
+        crash = next(r for r in caplog.records if "status line crashed" in r.getMessage())
+        assert crash.levelno == logging.ERROR
+        assert crash.exc_info is not None  # the traceback is in the log
+        assert "status line crashed: ZeroDivisionError('bug')" in result.failures
+
+    async def test_crash_of_the_loop_lag_probe_fails_the_run(self, city, osrm, clock, monkeypatch):
+        async def broken_probe(samples, clock):
+            raise RuntimeError("bug")
+
+        monkeypatch.setattr(runner, "_probe_loop_lag", broken_probe)
+
+        result = await simulate(city, osrm, clock, drivers=1, duration_s=5)
+
+        assert "loop lag probe crashed: RuntimeError('bug')" in result.failures
+
 
 class TestFlakyBots:
     def test_share_of_flaky_bots(self):

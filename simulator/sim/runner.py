@@ -112,9 +112,11 @@ async def run(
         for i, bot in enumerate(bots)
     ]
     helpers = [
-        asyncio.create_task(_report(bots, loop_lag_s, clock)),
-        asyncio.create_task(_probe_loop_lag(loop_lag_s, clock)),
+        asyncio.create_task(_report(bots, loop_lag_s, clock), name="status line"),
+        asyncio.create_task(_probe_loop_lag(loop_lag_s, clock), name="loop lag probe"),
     ]
+    for helper in helpers:
+        helper.add_done_callback(_log_crash)
     try:
         await _until_done(stop, clock, options.duration_s)
     finally:
@@ -122,10 +124,14 @@ async def run(
         ending.set()
         for bot in bots:
             bot.stop()
-        cancelled = await _wait_or_cancel(tasks, clock, config.SHUTDOWN_TIMEOUT_S + 2)
-        for task in helpers:
-            task.cancel()
-        await asyncio.gather(*helpers, return_exceptions=True)
+        try:
+            cancelled = await _wait_or_cancel(tasks, clock, config.SHUTDOWN_TIMEOUT_S + 2)
+        finally:
+            # Also when the run itself is cancelled meanwhile (a second Ctrl+C):
+            # nothing the run started may outlive it.
+            for task in (*tasks, *helpers):
+                task.cancel()
+            await asyncio.gather(*tasks, *helpers, return_exceptions=True)
 
     conditions = Conditions(
         drivers=options.drivers,
@@ -137,7 +143,11 @@ async def run(
         started_at=started_at,
         finished_at=datetime.now(UTC),
     )
-    failures = strict_failures(bots)
+    failures = strict_failures(bots) + [
+        f"{helper.get_name()} crashed: {_crash_of(helper)!r}"
+        for helper in helpers
+        if _crash_of(helper) is not None
+    ]
     if cancelled:
         # They may still be online on the server, waiting for the reaper.
         failures.append(f"{cancelled} bots did not stop in time")
@@ -294,22 +304,40 @@ async def _first(*coroutines) -> None:
 async def _wait_or_cancel(tasks: list[asyncio.Task], clock: Clock, seconds: float) -> int:
     """Give the bots `seconds` to go offline and close; cancel the ones that did not.
     Returns how many were cancelled."""
-    deadline = asyncio.create_task(clock.sleep(seconds))
     pending = {task for task in tasks if not task.done()}
-    try:
-        while pending and not deadline.done():
-            _, pending = await asyncio.wait(
-                {*pending, deadline}, return_when=asyncio.FIRST_COMPLETED
-            )
-            pending.discard(deadline)
-    finally:
-        deadline.cancel()
     if pending:
-        logger.warning("%d bots did not stop in %gs, cancelling them", len(pending), seconds)
-        for task in pending:
+        # One wait for all of them (asyncio.wait never cancels what it waits for),
+        # raced against the deadline on the bots' clock.
+        everyone = asyncio.create_task(asyncio.wait(pending))
+        deadline = asyncio.create_task(clock.sleep(seconds))
+        try:
+            await asyncio.wait({everyone, deadline}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in (everyone, deadline):
+                waiter.cancel()
+            await asyncio.gather(everyone, deadline, return_exceptions=True)
+    # Only the bots still running now; one that finished at the deadline is not late.
+    late = [task for task in tasks if not task.done()]
+    if late:
+        logger.warning("%d bots did not stop in %gs, cancelling them", len(late), seconds)
+        for task in late:
             task.cancel()
-    await asyncio.gather(deadline, *tasks, return_exceptions=True)
-    return len(pending)
+    await asyncio.gather(*tasks, return_exceptions=True)
+    return len(late)
+
+
+def _crash_of(task: asyncio.Task) -> BaseException | None:
+    """What a finished helper task died of; None if it was only cancelled."""
+    if not task.done() or task.cancelled():
+        return None
+    return task.exception()
+
+
+def _log_crash(task: asyncio.Task) -> None:
+    """At once, not only in the summary: the status lines would stop without a word."""
+    crash = _crash_of(task)
+    if crash is not None:
+        logger.error("%s crashed", task.get_name(), exc_info=crash)
 
 
 async def _report(bots: list[DriverBot], loop_lag_s: list[float], clock: Clock) -> None:
