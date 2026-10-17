@@ -73,16 +73,23 @@ class TestArguments:
 
 
 def fake_run(
-    failures: list[str], started: asyncio.Event | None = None, *, hang_after_stop: bool = False
+    failures: list[str],
+    started: asyncio.Event | None = None,
+    *,
+    stopping: asyncio.Event | None = None,
+    hang_after_stop: bool = False,
 ):
     """runner.run that waits for --duration or the stop, then returns a fixed result.
-    `started` is set once it runs: the signal handlers are installed by then."""
+    `started` is set once it runs (the signal handlers are installed by then),
+    `stopping` once it has seen the stop."""
 
     async def run(options, *, stop, **kwargs):
         if started is not None:
             started.set()
         if options.duration_s is None:
             await stop.wait()
+            if stopping is not None:
+                stopping.set()
             if hang_after_stop:
                 await asyncio.Event().wait()  # bots that never finish going offline
         return RunResult(
@@ -129,13 +136,13 @@ class TestMain:
         assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
     async def test_second_signal_forces_the_exit(self, monkeypatch, caplog):
-        started = asyncio.Event()
-        run = fake_run(failures=[], started=started, hang_after_stop=True)
+        started, stopping = asyncio.Event(), asyncio.Event()
+        run = fake_run(failures=[], started=started, stopping=stopping, hang_after_stop=True)
         monkeypatch.setattr(runner, "run", run)
         task = asyncio.create_task(cli.simulate(RunOptions()))
         await asyncio.wait_for(started.wait(), 2)
         os.kill(os.getpid(), signal.SIGTERM)
-        await asyncio.sleep(0.01)
+        await asyncio.wait_for(stopping.wait(), 2)  # the first signal was handled
 
         os.kill(os.getpid(), signal.SIGTERM)
         code = await asyncio.wait_for(task, 2)

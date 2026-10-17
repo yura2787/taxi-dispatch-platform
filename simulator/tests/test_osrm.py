@@ -185,7 +185,7 @@ class TestUnavailable:
         monkeypatch.setattr("sim.config.OSRM_TIMEOUT_S", 0.01)
 
         async def slow(request: httpx.Request) -> httpx.Response:
-            await asyncio.sleep(1)
+            await asyncio.Event().wait()  # never answers; only the timeout ends it
             return httpx.Response(200, json=ROUTE_BODY)
 
         client = make_client(slow)

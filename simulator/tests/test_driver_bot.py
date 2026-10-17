@@ -13,7 +13,7 @@ from sim.connection import Closed, ConnectFailed
 from sim.driver_bot import GOODBYE_TIMEOUT_S, Misbehaviour, _next_slot, reconnect_delay
 from sim.geo import Point, haversine_m
 from sim.osrm import NoRoute, OsrmUnavailable
-from tests.conftest import FakeOsrm, FakeServer
+from tests.conftest import FakeClock, FakeOsrm, FakeServer
 from tests.factories import CENTRE, make_bot
 
 FAR_AWAY = Point(50.4501, 30.5234)  # Kyiv: outside the service area
@@ -29,6 +29,27 @@ async def run(bot, clock, seconds: float) -> None:
 
 def as_point(location: dict) -> Point:
     return Point(location["lat"], location["lon"])
+
+
+def record_messages(server, clock) -> list[tuple[float, dict]]:
+    """(virtual time, message) of everything the bot sends to this server, in order."""
+    log: list[tuple[float, dict]] = []
+    handle = server.handle
+
+    def record(connection, message):
+        log.append((clock.elapsed, message))
+        handle(connection, message)
+
+    server.handle = record
+    return log
+
+
+def times_of(messages: list[tuple[float, dict]], message_type: str) -> list[float]:
+    return [t for t, message in messages if message["type"] == message_type]
+
+
+def gaps(times: list[float]) -> list[float]:
+    return [b - a for a, b in itertools.pairwise(times)]
 
 
 def locations_of(connection) -> list[dict]:
@@ -363,21 +384,43 @@ class TestOsrmUnavailable:
 
 class TestPing:
     async def test_ping_every_20_seconds(self, server, osrm, clock):
+        messages = record_messages(server, clock)
         bot = make_bot(server=server, osrm=osrm, clock=clock)
 
         await run(bot, clock, 101)
 
-        assert len(server.sent("ping")) == 5
+        pings = times_of(messages, "ping")
+        assert len(pings) == 5
+        assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * 4, abs=0.01)
 
     async def test_unanswered_ping_is_counted_and_replaced_by_the_next(self, server, osrm, clock):
         server.silent.add("ping")
+        messages = record_messages(server, clock)
         bot = make_bot(server=server, osrm=osrm, clock=clock)
 
         await run(bot, clock, 101)
 
-        assert len(server.sent("ping")) == 5
+        # Still one ping per interval: a missing pong neither stops nor speeds them up.
+        pings = times_of(messages, "ping")
+        assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * 4, abs=0.01)
         assert bot.stats.pongs_missed == 4
         assert bot.stats.rtt_s == []
+
+    async def test_pong_after_a_missed_one_is_timed_from_the_newest_ping(self, server, osrm, clock):
+        # The first ping gets no pong; the second one, answered 2 s late, is the
+        # only one in flight, so the sample is 2 s and not 22 s.
+        server.silent.add("ping")
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(2 * config.PING_INTERVAL_S + 2)
+
+        server.connections[0].push("pong")
+        await clock.sleep(1)
+        bot.stop()
+        await task
+
+        assert bot.stats.pongs_missed == 1
+        assert bot.stats.rtt_s == [pytest.approx(2, abs=0.01)]
 
     async def test_rtt_is_measured_from_the_scheduled_moment(self, server, osrm, clock):
         server.silent.add("ping")
@@ -818,8 +861,8 @@ def short_breaks(monkeypatch):
 
 
 @pytest.fixture
-def timeline(server, clock, monkeypatch) -> list[tuple[float, str]]:
-    """(virtual time, message type) of everything the bot sends."""
+def timeline(server, clock) -> list[tuple[float, str]]:
+    """(virtual time, message type) of everything the bot sends; filled as it runs."""
     log: list[tuple[float, str]] = []
     handle = server.handle
 
@@ -827,7 +870,7 @@ def timeline(server, clock, monkeypatch) -> list[tuple[float, str]]:
         log.append((clock.elapsed, message["type"]))
         handle(connection, message)
 
-    monkeypatch.setattr(server, "handle", record)
+    server.handle = record
     return log
 
 
@@ -850,8 +893,14 @@ class TestBreaks:
         assert offline_at == pytest.approx(60, abs=2.1)
         assert online_at - offline_at == pytest.approx(120, abs=2.1)
         # Only pings while on the break (in the order sent, not just by time: a point
-        # right after go_offline would get not_online).
+        # right after go_offline would get not_online), and still one per interval.
         assert set(kinds[start + 1 : end]) == {"ping"}
+        break_pings = [t for t, _ in timeline[start + 1 : end]]
+        expected = round(config.BREAK_DURATION_S[0] / config.PING_INTERVAL_S)
+        assert len(break_pings) == expected
+        assert gaps(break_pings) == pytest.approx(
+            [config.PING_INTERVAL_S] * (expected - 1), abs=0.01
+        )
         assert bot.stats.breaks == 1
         assert any(t > online_at for t, kind in timeline if kind == "location")
 
@@ -1132,7 +1181,9 @@ class TestFlakySilence:
         locations = [t for t, kind in timeline if kind == "location"]
         gap = max(b - a for a, b in itertools.pairwise(locations))
         assert gap == pytest.approx(config.SILENCE_S, abs=2.1)
-        silent_from = next(a for a, b in itertools.pairwise(locations) if b - a > 10)
+        silent_from = next(
+            a for a, b in itertools.pairwise(locations) if b - a > 2 * config.LOCATION_INTERVAL_S
+        )
         assert "ping" in between(timeline, silent_from, silent_from + config.SILENCE_S)
         assert bot.stats.silences == 1
 
@@ -1210,26 +1261,44 @@ class TestDriveFailure:
 
 
 class TestDeterminism:
-    async def test_same_seed_and_id_make_the_same_choices(self, clock):
-        choices = []
-        for _ in range(2):
-            osrm = FakeOsrm(clock)
-            bot = make_bot(server=FakeServer(), osrm=osrm, clock=clock, seed=5, driver_id=3)
-            await run(bot, clock, 1800)
-            choices.append(([route.geometry[-1] for route in osrm.routes], bot.stats.breaks))
+    async def drive(self, *, seed: int, driver_id: int, seconds: float) -> list:
+        """Everything one bot sends over a run, on a fresh clock: the moment, the type
+        and the data of each message (ts left out: it is the wall clock)."""
+        clock = FakeClock()
+        server = FakeServer()
+        messages = record_messages(server, clock)
+        bot = make_bot(
+            server=server, osrm=FakeOsrm(clock), clock=clock, seed=seed, driver_id=driver_id
+        )
+        await run(bot, clock, seconds)
+        return [
+            (t, message["type"], {k: v for k, v in message["data"].items() if k != "ts"})
+            for t, message in messages
+        ]
 
-        assert len(choices[0][0]) >= 3
-        assert choices[0] == choices[1]
+    async def test_same_seed_and_id_send_exactly_the_same_messages(self, monkeypatch):
+        # Breaks and pauses included: every random choice of the bot is in the stream.
+        monkeypatch.setattr(config, "BREAK_EVERY_S", (100, 300))
+        monkeypatch.setattr(config, "BREAK_DURATION_S", (30, 90))
 
-    async def test_other_bots_choose_differently(self, clock):
-        destinations = []
-        for driver_id in (1, 2):
-            osrm = FakeOsrm(clock)
-            bot = make_bot(server=FakeServer(), osrm=osrm, clock=clock, driver_id=driver_id)
-            await run(bot, clock, 60)
-            destinations.append(osrm.routes[0].geometry[-1])
+        first = await self.drive(seed=5, driver_id=3, seconds=900)
+        second = await self.drive(seed=5, driver_id=3, seconds=900)
 
-        assert destinations[0] != destinations[1]
+        assert first == second
+        kinds = {kind for _, kind, _ in first}
+        assert {"location", "ping", "go_offline", "go_online"} <= kinds  # a break happened
+
+    @pytest.mark.parametrize(
+        ("other_seed", "other_id"), [(5, 4), (6, 3)], ids=["other_bot", "other_seed"]
+    )
+    async def test_other_bot_or_seed_behaves_differently(self, other_seed, other_id):
+        one = await self.drive(seed=5, driver_id=3, seconds=60)
+
+        other = await self.drive(seed=other_seed, driver_id=other_id, seconds=60)
+
+        points = [data for _, kind, data in one if kind == "location"]
+        other_points = [data for _, kind, data in other if kind == "location"]
+        assert points != other_points
 
 
 class TestSchedule:
