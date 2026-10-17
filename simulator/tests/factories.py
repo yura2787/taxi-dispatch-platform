@@ -5,6 +5,7 @@ import random
 
 from sim.driver_bot import DriverBot
 from sim.geo import Point
+from sim.latency import LatencyRecorder
 from sim.routes import Route
 
 # Central Square of Chernivtsi.
@@ -38,6 +39,14 @@ def make_snapshot(*, status: str = "offline", position: Point | None = None) -> 
             "speed": None,
         }
     return json.dumps({"type": "state_snapshot", "data": data})
+
+
+def make_latency(values: list[float]) -> LatencyRecorder:
+    """A recorder with these samples, e.g. the RTTs of one bot."""
+    recorder = LatencyRecorder()
+    for value in values:
+        recorder.record(value)
+    return recorder
 
 
 def make_bot(

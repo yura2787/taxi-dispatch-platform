@@ -1,10 +1,10 @@
-"""Numbers of a run: percentiles, the status line every REPORT_INTERVAL_S and the
-summary at the end.
+"""Numbers of a run: the status line every REPORT_INTERVAL_S and the summary at the
+end.
 
-Percentiles of the client are taken from the full samples, never from averages:
-1000 bots x 10 min / 20 s is 30 thousand RTTs, which fit in memory easily. The
-samples are kept for the whole run, so a run of many hours grows them without bound
-(and every status line sorts them): runs are meant to last minutes.
+Percentiles of the client come from samples, never from averages, kept in log
+buckets (sim.latency): fixed memory however long the run (make sim runs for hours as
+the live city), each percentile within PRECISION of the exact one. The status line
+shows the last interval, the summary the whole run.
 """
 
 import os
@@ -14,20 +14,10 @@ from dataclasses import dataclass, field, fields
 from datetime import datetime
 
 from sim.driver_bot import AVAILABLE, BotStats, DriverBot
+from sim.latency import PRECISION, LatencyRecorder
 
-
-def percentile(values: Sequence[float], q: float) -> float | None:
-    """The q-th percentile (0..100) with linear interpolation between the closest
-    samples ("inclusive", as numpy's default); None for no samples."""
-    if not 0 <= q <= 100:
-        raise ValueError(f"percentile must be within 0..100, got {q}")
-    if not values:
-        return None
-    ordered = sorted(values)
-    position = (len(ordered) - 1) * q / 100
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+# Said in the lines of the summary: max and n are exact, the percentiles are not.
+_ESTIMATE = f"bucket estimate within {PRECISION:.0%}"
 
 
 def ms(seconds: float | None) -> str:
@@ -51,7 +41,7 @@ class Totals:
     silences: int = 0
     left_online: int = 0
     osrm_failures: int = 0
-    rtt_s: list[float] = field(default_factory=list)
+    rtt: LatencyRecorder = field(default_factory=LatencyRecorder)
     # Stopped before their start in the ramp-up: never even tried to connect.
     never_started: int = 0
     never_online: int = 0
@@ -76,8 +66,8 @@ class Totals:
             total = getattr(self, item.name)
             if isinstance(value, Counter):
                 total.update(value)
-            elif isinstance(value, list):
-                total.extend(value)
+            elif isinstance(value, LatencyRecorder):
+                total.merge(value)
             else:
                 setattr(self, item.name, total + value)
         self.never_started += not stats.started
@@ -85,25 +75,32 @@ class Totals:
 
 
 class StatusLine:
-    """The INFO line of every REPORT_INTERVAL_S; sent/s is over the last interval."""
+    """The INFO line of every REPORT_INTERVAL_S; sent/s and the percentiles are over
+    the last interval, so a slow start does not stay in it for hours."""
 
     def __init__(self) -> None:
         self._sent = 0
         self._at: float | None = None
+        self._rtt = LatencyRecorder()
+        self._loop_lag = LatencyRecorder()
 
-    def render(self, bots: Sequence[DriverBot], loop_lag_s: Sequence[float], now: float) -> str:
+    def render(self, bots: Sequence[DriverBot], loop_lag: LatencyRecorder, now: float) -> str:
         totals = Totals.of(bots)
         rate = 0.0
         if self._at is not None and now > self._at:
             rate = (totals.locations_sent - self._sent) / (now - self._at)
+        rtt = totals.rtt.minus(self._rtt)
+        lag = loop_lag.minus(self._loop_lag)
         self._sent, self._at = totals.locations_sent, now
+        # totals.rtt is built anew for every line; the probe's recorder keeps growing.
+        self._rtt, self._loop_lag = totals.rtt, loop_lag.copy()
         online = sum(bot.connected and bot.status == AVAILABLE for bot in bots)
         return (
             f"bots={len(bots)} connected={sum(bot.connected for bot in bots)} online={online} "
             f"on_break={sum(bot.on_break for bot in bots)} stopped={sum(totals.stopped.values())} "
             f"sent/s={rate:.1f} errors={sum(totals.errors.values())} "
-            f"reconnects={totals.reconnects} rtt_p95={ms(percentile(totals.rtt_s, 95))} "
-            f"loop_lag_p99={ms(percentile(loop_lag_s, 99))}"
+            f"reconnects={totals.reconnects} rtt_p95={ms(rtt.percentile(95))} "
+            f"loop_lag_p99={ms(lag.percentile(99))}"
         )
 
 
@@ -128,15 +125,15 @@ def _counts(counter: Counter) -> str:
     return ", ".join(f"{key}={count}" for key, count in sorted(counter.items(), key=str))
 
 
-def _percentiles(values: Sequence[float], qs: Iterable[float]) -> str:
-    parts = [f"p{q:g}={ms(percentile(values, q))}" for q in qs]
-    return " ".join([*parts, f"max={ms(max(values, default=None))}", f"n={len(values)}"])
+def _percentiles(recorder: LatencyRecorder, qs: Iterable[float]) -> str:
+    parts = [f"p{q:g}={ms(recorder.percentile(q))}" for q in qs]
+    return " ".join([*parts, f"max={ms(recorder.max)}", f"n={recorder.count}"])
 
 
 def summary(
     conditions: Conditions,
     bots: Sequence[DriverBot],
-    loop_lag_s: Sequence[float],
+    loop_lag: LatencyRecorder,
     *,
     cancelled: int = 0,
 ) -> list[str]:
@@ -156,9 +153,9 @@ def summary(
         "--- client ---",
         # Over the whole run, the ramp-up and the stop included.
         f"points sent: {totals.locations_sent} ({per_second:.1f}/s)",
-        f"ping->pong RTT: {_percentiles(totals.rtt_s, (50, 95, 99))}, "
+        f"ping->pong RTT ({_ESTIMATE}): {_percentiles(totals.rtt, (50, 95, 99))}, "
         f"pongs missed: {totals.pongs_missed}",
-        f"event loop lag: {_percentiles(loop_lag_s, (50, 99))}",
+        f"event loop lag ({_ESTIMATE}): {_percentiles(loop_lag, (50, 99))}",
         f"server errors: {_counts(totals.errors)}",
         f"closes by the server: {_counts(totals.closes)}",
         f"reconnects: {totals.reconnects}, failed connects: {totals.connect_failures}, "

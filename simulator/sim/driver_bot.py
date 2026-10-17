@@ -29,6 +29,7 @@ from sim import config, protocol
 from sim.clock import Clock
 from sim.connection import Closed, ConnectFailed, Connection
 from sim.geo import Point, haversine_m, random_point_in
+from sim.latency import LatencyRecorder
 from sim.osrm import NoRoute, OsrmClient, OsrmUnavailable
 from sim.protocol import CloseVerdict, ErrorVerdict
 from sim.routes import Route, RouteWalker
@@ -94,7 +95,7 @@ class BotStats:
     # Ping -> pong, measured from the moment the ping was scheduled, so a late send
     # (a busy event loop) shows up in the numbers instead of hiding (no coordinated
     # omission).
-    rtt_s: list[float] = field(default_factory=list)
+    rtt: LatencyRecorder = field(default_factory=LatencyRecorder)
     # Pings without a pong by the time of the next one: stalls the RTT samples miss.
     pongs_missed: int = 0
     # Tried to connect at all: a bot stopped during the ramp-up never does.
@@ -632,7 +633,7 @@ class DriverBot:
     def _on_pong(self) -> None:
         if self._ping_scheduled_at is None:
             return
-        self.stats.rtt_s.append(self._clock.monotonic() - self._ping_scheduled_at)
+        self.stats.rtt.record(self._clock.monotonic() - self._ping_scheduled_at)
         self._ping_scheduled_at = None
 
     def _on_error(self, code: str) -> None:

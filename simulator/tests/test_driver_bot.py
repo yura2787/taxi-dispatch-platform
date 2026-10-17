@@ -435,7 +435,7 @@ class TestPing:
         pings = times_of(messages, "ping")
         assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * (len(pings) - 1), abs=0.01)
         assert bot.stats.pongs_missed == len(pings) - 1
-        assert bot.stats.rtt_s == []
+        assert bot.stats.rtt.count == 0
 
     async def test_rtt_is_measured_from_the_scheduled_moment(self, server, osrm, clock):
         server.silent.add("ping")
@@ -451,7 +451,8 @@ class TestPing:
         bot.stop()
         await task
 
-        assert bot.stats.rtt_s == [pytest.approx(answered_at - sent_at, abs=0.01)]
+        assert bot.stats.rtt.count == 1
+        assert bot.stats.rtt.max == pytest.approx(answered_at - sent_at, abs=0.01)
 
     async def test_pong_after_a_missed_one_is_timed_from_the_newest_ping(self, server, osrm, clock):
         # Several pings go unanswered; the pong that finally comes is timed from the
@@ -471,7 +472,8 @@ class TestPing:
 
         assert len(pings) >= 2
         assert bot.stats.pongs_missed == len(pings) - 1
-        assert bot.stats.rtt_s == [pytest.approx(answered_at - pings[-1], abs=0.01)]
+        assert bot.stats.rtt.count == 1
+        assert bot.stats.rtt.max == pytest.approx(answered_at - pings[-1], abs=0.01)
 
     async def test_unexpected_pong_is_ignored(self, server, osrm, clock):
         bot = make_bot(server=server, osrm=osrm, clock=clock)
@@ -483,7 +485,7 @@ class TestPing:
         bot.stop()
         await task
 
-        assert bot.stats.rtt_s == []
+        assert bot.stats.rtt.count == 0
 
 
 # ---------------------------------------------------------------------------

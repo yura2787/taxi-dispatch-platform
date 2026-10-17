@@ -8,6 +8,7 @@ import pytest
 
 from sim import __main__ as cli
 from sim import runner
+from sim.latency import LatencyRecorder
 from sim.runner import RunOptions, RunResult
 
 
@@ -93,7 +94,10 @@ def fake_run(
             if hang_after_stop:
                 await asyncio.Event().wait()  # bots that never finish going offline
         return RunResult(
-            bots=[], loop_lag_s=[], report=["--- run ---", "points sent: 0"], failures=failures
+            bots=[],
+            loop_lag=LatencyRecorder(),
+            report=["--- run ---", "points sent: 0"],
+            failures=failures,
         )
 
     return run

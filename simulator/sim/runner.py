@@ -19,6 +19,7 @@ from typing import Any
 from sim import config, protocol, server_metrics
 from sim.clock import Clock
 from sim.driver_bot import Connect, DriverBot
+from sim.latency import LatencyRecorder
 from sim.osrm import OsrmClient
 from sim.protocol import ErrorVerdict
 from sim.server_metrics import ServerMetricsUnavailable, Snapshot
@@ -54,7 +55,7 @@ class RunOptions:
 @dataclass
 class RunResult:
     bots: list[DriverBot]
-    loop_lag_s: list[float]
+    loop_lag: LatencyRecorder
     report: list[str]
     # What --strict fails on; empty for a clean run.
     failures: list[str]
@@ -97,7 +98,7 @@ async def run(
         )
         for driver_id in options.driver_ids
     ]
-    loop_lag_s: list[float] = []
+    loop_lag = LatencyRecorder()
     logger.info(
         "Starting %d bots (ids %d..%d, %d flaky) over %gs",
         len(bots),
@@ -114,8 +115,8 @@ async def run(
         for i, bot in enumerate(bots)
     ]
     helpers = [
-        asyncio.create_task(_report(bots, loop_lag_s, clock), name="status line"),
-        asyncio.create_task(_probe_loop_lag(loop_lag_s, clock), name="loop lag probe"),
+        asyncio.create_task(_report(bots, loop_lag, clock), name="status line"),
+        asyncio.create_task(_probe_loop_lag(loop_lag, clock), name="loop lag probe"),
     ]
     for helper in helpers:
         helper.add_done_callback(_log_crash)
@@ -153,7 +154,7 @@ async def run(
     if cancelled:
         # They may still be online on the server, waiting for the reaper.
         failures.append(f"{cancelled} bots did not stop in time")
-    report = summary(conditions, bots, loop_lag_s, cancelled=cancelled)
+    report = summary(conditions, bots, loop_lag, cancelled=cancelled)
     if server_metrics_source is not None:
         server_report, server_failures = await _server_part(
             before, server_metrics_source, bots=bots, cancelled=cancelled
@@ -162,7 +163,7 @@ async def run(
         failures += server_failures
     return RunResult(
         bots=bots,
-        loop_lag_s=loop_lag_s,
+        loop_lag=loop_lag,
         report=report,
         failures=failures,
         cancelled=cancelled,
@@ -368,18 +369,18 @@ def _log_crash(task: asyncio.Task[None]) -> None:
         logger.error("%s crashed", task.get_name(), exc_info=crash)
 
 
-async def _report(bots: list[DriverBot], loop_lag_s: list[float], clock: Clock) -> None:
+async def _report(bots: list[DriverBot], loop_lag: LatencyRecorder, clock: Clock) -> None:
     line = StatusLine()
-    line.render(bots, loop_lag_s, clock.monotonic())  # the baseline for sent/s
+    line.render(bots, loop_lag, clock.monotonic())  # the baseline of the first interval
     while True:
         await clock.sleep(config.REPORT_INTERVAL_S)
-        logger.info(line.render(bots, loop_lag_s, clock.monotonic()))
+        logger.info(line.render(bots, loop_lag, clock.monotonic()))
 
 
-async def _probe_loop_lag(samples: list[float], clock: Clock) -> None:
+async def _probe_loop_lag(samples: LatencyRecorder, clock: Clock) -> None:
     """How late a short sleep wakes up: the first sign that one process is not enough
     for the bots (S4), long before the server starts rejecting stale points."""
     while True:
         due = clock.monotonic() + config.LOOP_LAG_PROBE_S
         await clock.sleep(config.LOOP_LAG_PROBE_S)
-        samples.append(max(clock.monotonic() - due, 0.0))
+        samples.record(max(clock.monotonic() - due, 0.0))

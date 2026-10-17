@@ -217,7 +217,7 @@ class TestHelperCrashes:
     ):
         calls = []
 
-        def broken_render(self, bots, loop_lag_s, now):
+        def broken_render(self, bots, loop_lag, now):
             calls.append(now)
             if len(calls) > 1:  # the baseline at the start works, the first line breaks
                 raise ZeroDivisionError("bug")
@@ -283,8 +283,8 @@ class TestReporting:
     async def test_loop_lag_is_sampled_all_along(self, city, osrm, clock):
         result = await simulate(city, osrm, clock, drivers=1, duration_s=10)
 
-        assert len(result.loop_lag_s) == pytest.approx(10 / config.LOOP_LAG_PROBE_S, abs=2)
-        assert max(result.loop_lag_s) == 0  # virtual time is never late
+        assert result.loop_lag.count == pytest.approx(10 / config.LOOP_LAG_PROBE_S, abs=2)
+        assert result.loop_lag.max == 0  # virtual time is never late
 
     async def test_report_has_client_numbers(self, city, osrm, clock):
         result = await simulate(city, osrm, clock, drivers=2, ramp_up_s=0, duration_s=20)
