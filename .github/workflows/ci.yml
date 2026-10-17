@@ -251,11 +251,18 @@ jobs:
           done
           docker compose logs realtime nginx
           exit 1
-      # --wait only knows the dispatcher is running; ask its metrics that it serves.
+      # --wait only knows the dispatcher is running; ask its metrics that it serves
+      # (it may still be starting up, so a few tries, as for realtime above).
       - name: Check that the dispatcher (the reaper) is alive
-        run: >
-          docker compose exec -T realtime python -c
-          "import urllib.request as u; u.urlopen('http://dispatcher:8002/metrics', timeout=5)"
+        run: |
+          for _ in $(seq 30); do
+            docker compose exec -T realtime python -c \
+              "import urllib.request as u; u.urlopen('http://dispatcher:8002/metrics', timeout=5)" \
+              && exit 0
+            sleep 1
+          done
+          docker compose logs dispatcher
+          exit 1
       - run: make seed-drivers n=20
       # --no-deps: nginx is up; its other dependencies (django, frontend) are not needed.
       - name: Run 20 bots for 60 s

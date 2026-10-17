@@ -128,11 +128,13 @@ async def simulate(options: runner.RunOptions) -> int:
 
     # print, not log: the summary is meant to be copied (e.g. into a pull request).
     print("\n".join(result.report), flush=True)
-    if options.strict and result.failures:
-        for failure in result.failures:
+    # Always shown: without --strict they only do not change the exit code.
+    for failure in result.failures:
+        if options.strict:
             logger.error("Strict run failed: %s", failure)
-        return 1
-    return 0
+        else:
+            logger.warning("Run not clean: %s", failure)
+    return 1 if options.strict and result.failures else 0
 
 
 def main(argv: list[str] | None = None) -> int:

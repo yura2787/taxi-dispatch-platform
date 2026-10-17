@@ -52,6 +52,8 @@ class Totals:
     left_online: int = 0
     osrm_failures: int = 0
     rtt_s: list[float] = field(default_factory=list)
+    # Stopped before their start in the ramp-up: never even tried to connect.
+    never_started: int = 0
     never_online: int = 0
     stopped: Counter[str] = field(default_factory=Counter)
 
@@ -66,7 +68,7 @@ class Totals:
 
     def _add(self, stats: BotStats) -> None:
         # Field by field, so a new counter in BotStats needs only its line here
-        # in Totals; the flags are summed up into never_online below.
+        # in Totals; the flags are summed up into never_started and never_online.
         for item in fields(BotStats):
             value = getattr(stats, item.name)
             if isinstance(value, bool):
@@ -78,6 +80,7 @@ class Totals:
                 total.extend(value)
             else:
                 setattr(self, item.name, total + value)
+        self.never_started += not stats.started
         self.never_online += stats.started and not stats.went_online
 
 
@@ -163,6 +166,7 @@ def summary(
         f"unknown messages: {totals.unknown_messages}",
         f"breaks: {totals.breaks}, drops: {totals.drops}, silences: {totals.silences}, "
         f"OSRM failures: {totals.osrm_failures}",
-        f"never online: {totals.never_online}, stopped bots: {_counts(totals.stopped)}, "
+        f"never started: {totals.never_started}, never online: {totals.never_online}, "
+        f"stopped bots: {_counts(totals.stopped)}, "
         f"cancelled at the stop: {cancelled}, left online at the stop: {totals.left_online}",
     ]

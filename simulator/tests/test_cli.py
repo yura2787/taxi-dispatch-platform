@@ -116,12 +116,14 @@ class TestMain:
         assert code == 1
         assert "2 bots never got online" in caplog.text
 
-    def test_failures_without_strict_still_exit_with_0(self, monkeypatch):
-        monkeypatch.setattr(runner, "run", fake_run(failures=["anything"]))
+    def test_failures_without_strict_are_logged_and_exit_with_0(self, monkeypatch, caplog):
+        monkeypatch.setattr(runner, "run", fake_run(failures=["2 pings got no pong"]))
 
         code = cli.main(["run", "--duration", "1"])
 
         assert code == 0
+        record = next(r for r in caplog.records if "2 pings got no pong" in r.getMessage())
+        assert record.levelname == "WARNING"
 
     async def test_sigterm_stops_the_run(self, monkeypatch):
         started = asyncio.Event()

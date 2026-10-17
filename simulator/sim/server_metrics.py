@@ -7,6 +7,7 @@ the difference: accepted and refused points, closes by code and the processing t
 percentiles, estimated from the histogram buckets like Prometheus does.
 """
 
+import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -16,8 +17,13 @@ from prometheus_client.parser import text_string_to_metric_families
 
 from sim.stats import ms
 
+logger = logging.getLogger(__name__)
+
 # A failed fetch must not hold up the start or the summary of a run.
 FETCH_TIMEOUT_S = 2
+
+# One retry: right after 1000 bots went offline a single answer may come late.
+FETCH_ATTEMPTS = 2
 
 # Points that reached Redis; out_of_zone is accepted too (spec 11.1, W6).
 ACCEPTED_RESULTS = ("accepted", "out_of_zone")
@@ -98,12 +104,28 @@ def parse(text: str) -> Snapshot:
 
 
 async def fetch(http: httpx.AsyncClient, url: str) -> Snapshot:
+    """A snapshot of /rt/metrics; a failed request is tried once more, an answer that
+    does not parse is not (it would not parse the second time either)."""
     try:
-        response = await http.get(url, timeout=FETCH_TIMEOUT_S)
-        response.raise_for_status()
+        response = await _get(http, url)
         return parse(response.text)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise ServerMetricsUnavailable(f"{type(exc).__name__}: {exc}") from exc
+
+
+async def _get(http: httpx.AsyncClient, url: str) -> httpx.Response:
+    for _ in range(FETCH_ATTEMPTS - 1):
+        try:
+            return await _get_once(http, url)
+        except httpx.HTTPError as exc:
+            logger.warning("server metrics: %s: %s, trying again", type(exc).__name__, exc)
+    return await _get_once(http, url)
+
+
+async def _get_once(http: httpx.AsyncClient, url: str) -> httpx.Response:
+    response = await http.get(url, timeout=FETCH_TIMEOUT_S)
+    response.raise_for_status()
+    return response
 
 
 def histogram_quantile(q: float, buckets: Mapping[float, float]) -> float | None:

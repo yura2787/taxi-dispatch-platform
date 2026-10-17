@@ -10,6 +10,7 @@ cancelled, and the summary is built.
 import asyncio
 import logging
 import random
+from collections import Counter
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -214,16 +215,20 @@ def server_failures(
     failures = []
     if change.accepted <= 0:
         failures.append("the server accepted no points")
+    totals = Totals.of(bots)
     refused = dict(change.refused_by_result)
-    if any_flaky(bots):
-        # Points of silent flaky bots after the reaper took them offline.
+    # Points of silent flaky bots after the reaper took them offline. The server does
+    # not say whose points they were, only that each got a not_online back: as many
+    # as the bots heard (one may be lost with each drop) are tolerated. A not_online
+    # of a bot that is not flaky still fails the run (strict_failures).
+    heard = totals.errors["not_online"] + totals.drops
+    if any_flaky(bots) and refused.get("rejected_offline", 0) <= heard:
         refused.pop("rejected_offline", None)
     if refused:
         failures.append(f"points refused by the server: {refused}")
     closes = {code: count for code, count in change.closes.items() if count}
     if closes:
         failures.append(f"drivers closed by the server: {closes}")
-    totals = Totals.of(bots)
     # A connection that ends without a goodbye (a drop, a close by the server, a
     # timeout, a cancelled bot) may take the points still in its socket with it;
     # those cases are failures of their own when they are not the bots' drops.
@@ -241,23 +246,23 @@ def any_flaky(bots: Sequence[DriverBot]) -> bool:
 
 def strict_failures(bots: Sequence[DriverBot]) -> list[str]:
     """Why a run is not clean, from the bots' side (ТЗ 08, 9.1 a-c and more): anything
-    the server refused, closed or did not answer. Flaky bots misbehave on purpose,
-    but none of that ends in a close or a failed connection; their silences end in
-    not_online, which only counts as a failure when no bot is flaky."""
+    the server refused, closed or did not answer, and bots that did not run at all.
+    Flaky bots misbehave on purpose, but none of that ends in a close or a failed
+    connection; their silences end in not_online, which is a failure for any other
+    bot."""
     totals = Totals.of(bots)
     failures = []
+    if totals.never_started:
+        failures.append(
+            f"{totals.never_started} bots never started: the run ended within the ramp-up"
+        )
     if totals.never_online:
         failures.append(f"{totals.never_online} bots never got online")
     if totals.stopped:
         failures.append(f"bots stopped for good: {dict(totals.stopped)}")
-    verdicts = _BOT_FAULTS if any_flaky(bots) else _BOT_FAULTS | {ErrorVerdict.NOT_ONLINE}
-    faults = {
-        code: count
-        for code, count in totals.errors.items()
-        if protocol.classify_error(code) in verdicts
-    }
+    faults = _bot_faults(bots)
     if faults:
-        failures.append(f"server errors caused by the bots: {faults}")
+        failures.append(f"server errors caused by the bots: {dict(faults)}")
     if totals.closes:
         failures.append(f"connections closed by the server: {dict(totals.closes)}")
     if totals.connect_failures or totals.handshake_timeouts:
@@ -269,7 +274,29 @@ def strict_failures(bots: Sequence[DriverBot]) -> list[str]:
         failures.append(f"unknown messages from the server: {totals.unknown_messages}")
     if totals.left_online:
         failures.append(f"{totals.left_online} bots may be left online after the stop")
+    if totals.pongs_missed:
+        failures.append(f"{totals.pongs_missed} pings got no pong")
+    if totals.osrm_failures:
+        failures.append(
+            f"{totals.osrm_failures} OSRM requests failed: cars stood or started off the road"
+        )
     return failures
+
+
+def _bot_faults(bots: Sequence[DriverBot]) -> Counter[str]:
+    """Server errors the bots caused, bot by bot: not_online is expected only from a
+    flaky bot (after its silence), so another bot's one still counts."""
+    faults: Counter[str] = Counter()
+    for bot in bots:
+        verdicts = _BOT_FAULTS if bot.flaky else _BOT_FAULTS | {ErrorVerdict.NOT_ONLINE}
+        faults.update(
+            {
+                code: count
+                for code, count in bot.stats.errors.items()
+                if protocol.classify_error(code) in verdicts
+            }
+        )
+    return faults
 
 
 async def _start(bot: DriverBot, delay: float, clock: Clock, ending: asyncio.Event) -> None:

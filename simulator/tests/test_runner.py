@@ -13,21 +13,40 @@ from sim import config, runner
 from sim.driver_bot import BotStats
 from sim.runner import RunOptions, flaky_ids, server_failures, strict_failures
 from sim.server_metrics import ServerMetricsUnavailable, Snapshot
+from sim.stats import Totals
 from tests.conftest import FakeServer
 
 INF = math.inf
 
 
 class City:
-    """One fake server per bot, as if each phone had the realtime server to itself."""
+    """One fake server per bot, as if each phone had the realtime server to itself.
+
+    Also remembers when each server got its last point, and how many points came
+    while the driver was offline (the server's rejected_offline).
+    """
 
     def __init__(self, clock):
         self.clock = clock
         self.servers: dict[int, FakeServer] = {}
         self.first_connect_at: dict[int, float] = {}
+        self.last_point_at: dict[int, float] = {}
+        self.refused_offline = 0
 
     def server(self, driver_id: int) -> FakeServer:
-        return self.servers.setdefault(driver_id, FakeServer())
+        if driver_id not in self.servers:
+            server = FakeServer()
+            handle = server.handle
+
+            def record(connection, message):
+                if message["type"] == "location":
+                    self.last_point_at[driver_id] = self.clock.elapsed
+                    self.refused_offline += server.status != "available"
+                handle(connection, message)
+
+            server.handle = record
+            self.servers[driver_id] = server
+        return self.servers[driver_id]
 
     def connect_for(self, driver_id: int):
         async def connect():
@@ -66,8 +85,25 @@ class FakeMetrics:
         self.calls += 1
         if self.calls in self.down_at:
             raise ServerMetricsUnavailable("ConnectError: refused")
-        accepted = sum(len(server.sent("location")) for server in self.city.servers.values())
-        return Snapshot(updates={"accepted": accepted}, buckets={0.001: accepted, INF: accepted})
+        points = sum(len(server.sent("location")) for server in self.city.servers.values())
+        accepted = points - self.city.refused_offline
+        return Snapshot(
+            updates={"accepted": accepted, "rejected_offline": self.city.refused_offline},
+            buckets={0.001: accepted, INF: accepted},
+        )
+
+
+async def reap(city: City, clock) -> None:
+    """The dispatcher's reaper for the fake servers: every SERVER_REAPER_INTERVAL_S
+    takes offline a driver without a point for SERVER_DRIVER_SILENCE_S. Like the real
+    one, only points count (drivers:last_seen), not pings."""
+    while True:
+        await clock.sleep(config.SERVER_REAPER_INTERVAL_S)
+        for driver_id, server in city.servers.items():
+            last = city.last_point_at.get(driver_id)
+            silent = last is not None and clock.elapsed - last > config.SERVER_DRIVER_SILENCE_S
+            if server.status == "available" and silent:
+                server.status = "offline"
 
 
 class TestStart:
@@ -271,10 +307,12 @@ class TestStrict:
 
         assert result.failures == ["1 bots never got online"]
 
-    async def test_bots_stopped_before_their_start_do_not_fail_the_run(self, city, osrm, clock):
+    async def test_bots_stopped_before_their_start_fail_the_run(self, city, osrm, clock):
+        # --duration shorter than --ramp-up: most bots never even tried.
         result = await simulate(city, osrm, clock, drivers=10, ramp_up_s=100, duration_s=5)
 
-        assert result.failures == []
+        assert result.failures == ["9 bots never started: the run ended within the ramp-up"]
+        assert "never started: 9, never online: 0" in "\n".join(result.report)
 
     async def test_crashing_bot_is_logged_and_fails_the_run(
         self, city, osrm, clock, monkeypatch, caplog
@@ -319,6 +357,21 @@ class TestStrict:
 
         assert failures == []
 
+    def test_not_online_of_a_steady_bot_fails_even_among_flaky_ones(self):
+        flaky = bot_view(errors=Counter(not_online=3), flaky=True)
+        steady = bot_view(errors=Counter(not_online=1))
+
+        failures = strict_failures([flaky, steady])
+
+        assert failures == ["server errors caused by the bots: {'not_online': 1}"]
+
+    def test_bot_that_never_started_is_a_failure(self):
+        bot = bot_view(started=False, went_online=False)
+
+        failures = strict_failures([bot])
+
+        assert failures == ["1 bots never started: the run ended within the ramp-up"]
+
     def test_not_online_without_flaky_bots_is_a_failure(self):
         # Nobody falls silent: the reaper had no reason to take a bot offline.
         bot = bot_view(errors=Counter(not_online=1))
@@ -335,8 +388,18 @@ class TestStrict:
             ({"handshake_timeouts": 1}, "failed connections: 0, handshake timeouts: 1"),
             ({"unknown_messages": 3}, "unknown messages from the server: 3"),
             ({"left_online": 1}, "1 bots may be left online after the stop"),
+            ({"pongs_missed": 2}, "2 pings got no pong"),
+            ({"osrm_failures": 3}, "3 OSRM requests failed: cars stood or started off the road"),
         ],
-        ids=["closes", "connect_failures", "handshake_timeouts", "unknown_messages", "left"],
+        ids=[
+            "closes",
+            "connect_failures",
+            "handshake_timeouts",
+            "unknown_messages",
+            "left",
+            "pongs",
+            "osrm",
+        ],
     )
     def test_anything_the_server_closed_or_did_not_answer_is_a_failure(self, stats, failure):
         bot = bot_view(flaky=True, **stats)
@@ -352,10 +415,67 @@ class TestStrict:
 
 
 def bot_view(*, flaky: bool = False, **stats) -> SimpleNamespace:
-    """What the strict checks read from a bot that started and got online."""
+    """What the strict checks read from a bot (by default one that started and got
+    online)."""
     return SimpleNamespace(
-        stats=BotStats(started=True, went_online=True, **stats), stop_reason=None, flaky=flaky
+        stats=BotStats(**({"started": True, "went_online": True} | stats)),
+        stop_reason=None,
+        flaky=flaky,
     )
+
+
+@pytest.fixture
+def often_flaky(monkeypatch):
+    """A misbehaviour every 30 s of driving; drops of 10 s."""
+    monkeypatch.setattr(config, "FLAKY_EVERY_S", (30, 30))
+    monkeypatch.setattr(config, "DROP_DURATION_S", (10, 10))
+
+
+class TestFlakyRun:
+    """A whole run with flaky bots against fake servers with a reaper: what they do on
+    purpose fails nothing, anything else still does."""
+
+    OPTIONS = {"drivers": 6, "flaky_share": 0.5, "ramp_up_s": 0, "duration_s": 240}
+
+    async def run_with_reaper(self, city, osrm, clock, *, during=None) -> runner.RunResult:
+        reaper = asyncio.create_task(reap(city, clock))
+        run = asyncio.create_task(
+            simulate(city, osrm, clock, metrics=FakeMetrics(city), **self.OPTIONS)
+        )
+        if during is not None:
+            await during()
+        try:
+            return await run
+        finally:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
+
+    async def test_drops_and_silences_of_flaky_bots_leave_the_run_clean(
+        self, city, osrm, clock, often_flaky
+    ):
+        result = await self.run_with_reaper(city, osrm, clock)
+
+        totals = Totals.of(result.bots)
+        # The run really had what it is about: drops, and silences ended by the reaper.
+        assert totals.drops > 0
+        assert totals.silences > 0
+        assert totals.errors["not_online"] > 0
+        assert city.refused_offline > 0
+        assert result.failures == []
+
+    async def test_not_online_of_a_steady_bot_fails_a_run_with_flaky_ones(
+        self, city, osrm, clock, often_flaky
+    ):
+        flaky = flaky_ids(RunOptions(**self.OPTIONS))
+        steady = next(i for i in RunOptions(**self.OPTIONS).driver_ids if i not in flaky)
+
+        async def lose_the_steady_bot():
+            await clock.sleep(100)
+            city.server(steady).status = "offline"  # e.g. a bug in the reaper
+
+        result = await self.run_with_reaper(city, osrm, clock, during=lose_the_steady_bot)
+
+        assert result.failures == ["server errors caused by the bots: {'not_online': 1}"]
 
 
 class TestServerFailures:
@@ -377,10 +497,21 @@ class TestServerFailures:
 
     def test_offline_points_of_silent_flaky_bots_are_not_a_failure(self):
         change = Snapshot(updates={"accepted": 9, "rejected_offline": 1})
+        bot = bot_view(locations_sent=10, flaky=True, errors=Counter(not_online=1))
 
-        failures = server_failures(change, [bot_view(locations_sent=10, flaky=True)])
+        failures = server_failures(change, [bot])
 
         assert failures == []
+
+    def test_offline_points_no_bot_heard_about_are_a_failure(self):
+        # Every point refused as offline gets a not_online back; one more refusal
+        # than the bots heard of (or lost in a drop) is not a silent flaky bot.
+        change = Snapshot(updates={"accepted": 7, "rejected_offline": 3})
+        bot = bot_view(locations_sent=10, flaky=True, errors=Counter(not_online=1), drops=1)
+
+        failures = server_failures(change, [bot])
+
+        assert failures == ["points refused by the server: {'rejected_offline': 3}"]
 
     def test_drivers_closed_by_the_server_are_a_failure(self):
         change = Snapshot(updates={"accepted": 10}, closes={"1011": 2, "4409": 0})

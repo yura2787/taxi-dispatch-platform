@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from sim.server_metrics import (
+    FETCH_ATTEMPTS,
     ServerMetricsUnavailable,
     Snapshot,
     fetch,
@@ -161,6 +162,48 @@ class TestFetch:
         async with serve(refuse) as http:
             with pytest.raises(ServerMetricsUnavailable):
                 await fetch(http, "http://realtime:8001/rt/metrics")
+
+    async def test_one_failed_request_is_retried(self):
+        # One slow answer right after 1000 bots went offline must not cost the report.
+        calls = []
+
+        def slow_once(request):
+            calls.append(request)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("slow")
+            return httpx.Response(200, text=METRICS_TEXT)
+
+        async with serve(slow_once) as http:
+            snapshot = await fetch(http, "http://realtime:8001/rt/metrics")
+
+        assert snapshot.accepted == 185
+        assert len(calls) == 2
+
+    async def test_gives_up_after_the_retry(self):
+        calls = []
+
+        def refuse(request):
+            calls.append(request)
+            raise httpx.ConnectError("refused")
+
+        async with serve(refuse) as http:
+            with pytest.raises(ServerMetricsUnavailable):
+                await fetch(http, "http://realtime:8001/rt/metrics")
+
+        assert len(calls) == FETCH_ATTEMPTS
+
+    async def test_garbage_is_not_retried(self):
+        calls = []
+
+        def garbage(request):
+            calls.append(request)
+            return httpx.Response(200, text='location_updates_total{result="accepted" 1\n')
+
+        async with serve(garbage) as http:
+            with pytest.raises(ServerMetricsUnavailable):
+                await fetch(http, "http://realtime:8001/rt/metrics")
+
+        assert len(calls) == 1  # the same answer again would not parse either
 
     async def test_url_without_a_scheme_is_unavailable(self):
         # A typo in REALTIME_METRICS_URL must not crash the run before it starts.
