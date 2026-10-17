@@ -818,7 +818,7 @@ class TestShutdown:
 
         assert server.connections[0].closed_with == 1000
 
-    async def test_server_closing_during_the_shutdown_ends_it_quietly(self, server, osrm, clock):
+    async def test_server_closing_during_the_shutdown_leads_to_a_goodbye(self, server, osrm, clock):
         server.silent.add("go_offline")
         bot = make_bot(server=server, osrm=osrm, clock=clock)
         task = asyncio.create_task(bot.run())
@@ -827,11 +827,73 @@ class TestShutdown:
         await clock.sleep(1)  # the bot has sent go_offline and waits for the snapshot
 
         server.connections[0].drop(1001)
+        server.silent.clear()
         await task
 
-        assert bot.stop_reason is None
-        assert len(server.connections) == 1
+        # The go_offline was never confirmed: one more connection just to go offline.
+        assert server.connections[1].sent_types() == ["auth", "go_offline"]
+        assert server.status == "offline"
+        assert bot.stats.left_online == 0
         assert bot.stats.closes[1001] == 1
+        assert bot.stop_reason is None
+
+    async def test_server_closing_during_the_shutdown_and_a_refused_goodbye_leave_it_online(
+        self, server, osrm, clock
+    ):
+        server.silent.add("go_offline")
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        bot.stop()
+        await clock.sleep(1)
+
+        server.connections[0].drop(1001)
+        server.refuse_connections = 1
+        await task
+
+        assert server.status == "available"
+        assert bot.stats.left_online == 1
+        assert bot.stats.closes[1001] == 1
+
+    @pytest.mark.parametrize("code", [4401, 4403, 4409, 1008, 1009])
+    async def test_closed_for_good_during_the_shutdown_stops_without_a_goodbye(
+        self, server, osrm, clock, code
+    ):
+        # A goodbye would be refused, or, after 4409, take the driver offline from the
+        # connection that has just taken it over.
+        server.silent.add("go_offline")
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        bot.stop()
+        await clock.sleep(1)
+
+        server.connections[0].drop(code)
+        await task
+
+        assert len(server.connections) == 1
+        assert bot.stop_reason == f"closed {code}"
+        assert bot.stats.closes == {code: 1}
+
+    async def test_stop_before_the_snapshot_of_a_reconnect_still_goes_offline(
+        self, server, osrm, clock
+    ):
+        # Online on the server (W4) while the new connection waits for its snapshot.
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(10)
+        server.silent.add("auth")
+        server.connections[0].drop(1011)
+        await clock.sleep(3)  # reconnected (backoff < 1 s), no snapshot yet
+        server.silent.clear()
+
+        bot.stop()
+        await task
+
+        assert server.connections[1].sent_types() == ["auth"]
+        assert server.connections[2].sent_types() == ["auth", "go_offline"]
+        assert server.status == "offline"
+        assert bot.stats.left_online == 0
 
     async def test_connection_already_closed_at_the_shutdown_is_only_counted(
         self, server, osrm, clock
@@ -1010,6 +1072,58 @@ class TestBreaks:
         connection = server.connections[0]
         assert connection.sent_types().count("go_offline") == 1  # the break's own
         assert connection.closed_with == 1000
+
+    async def test_stop_as_a_break_begins_sends_go_offline_once(
+        self, server, osrm, clock, short_breaks
+    ):
+        server.silent.add("go_offline")  # the break's go_offline is still unanswered
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(63)
+        state_at_stop = (bot.on_break, bot.status)
+
+        bot.stop()
+        await task
+
+        assert state_at_stop == (True, "available")
+        assert server.connections[0].sent_types().count("go_offline") == 1
+        assert bot.stats.left_online == 1  # never confirmed
+
+    async def test_stop_after_the_offline_of_a_break_needs_no_goodbye(
+        self, server, osrm, clock, short_breaks
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(70)  # on the break, offline confirmed
+        server.refuse_connections = 100
+        server.connections[0].drop(1011)
+
+        bot.stop()
+        await task
+
+        assert len(server.connections) == 1
+        assert bot.stats.left_online == 0
+
+    async def test_goodbye_on_a_break_sends_go_offline_once(
+        self, server, osrm, clock, short_breaks
+    ):
+        server.silent.add("go_offline")  # the break's go_offline is lost
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(70)
+        server.refuse_connections = 100  # stopped while reconnecting
+        server.connections[0].drop(1011)
+        await clock.sleep(1)
+        server.refuse_connections = 0
+        server.silent.clear()
+
+        bot.stop()
+        await task
+
+        # The snapshot says "available" on a break: go_offline is sent there, once.
+        assert server.connections[1].sent_types() == ["auth", "go_offline"]
+        assert server.status == "offline"
+        assert bot.stats.left_online == 0
 
     async def test_lost_go_offline_of_a_break_is_sent_again_after_a_reconnect(
         self, server, osrm, clock, short_breaks
@@ -1209,6 +1323,42 @@ class TestFlakyDrop:
 
         assert bot.stats.left_online == 1
         assert bot.stop_reason is None
+
+    async def test_close_during_the_goodbye_is_counted(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)
+        server.close_after_auth = 4409
+
+        bot.stop()
+        await task
+
+        assert bot.stats.closes == {4409: 1}
+        assert bot.stats.left_online == 1
+
+    async def test_server_closing_while_the_goodbye_goes_offline_is_left_online(
+        self, server, osrm, clock, monkeypatch, flaky_every_30_s
+    ):
+        bot = flaky_bot(server, osrm, clock, monkeypatch, Misbehaviour.DROP)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(33)
+        handle = server.handle
+
+        def close_on_go_offline(connection, message):
+            if message["type"] == "go_offline":
+                connection.drop(1011)
+            else:
+                handle(connection, message)
+
+        server.handle = close_on_go_offline
+
+        bot.stop()
+        await task
+
+        assert bot.stats.left_online == 1
+        assert bot.stats.closes[1011] == 1
 
     async def test_bug_in_the_goodbye_is_not_swallowed(
         self, server, osrm, clock, monkeypatch, flaky_every_30_s

@@ -193,6 +193,11 @@ class DriverBot:
         self._offline = asyncio.Event()
         # When the bot last asked to go online and has had no "available" since.
         self._go_online_sent_at: float | None = None
+        # The server may hold the bot online: set by "available" and by every
+        # go_online, cleared only by "offline" or by giving up (left_online). Unlike
+        # status it outlives the connection, so a stop between two connections still
+        # knows it has to go offline.
+        self._may_be_online = False
         self._last_snapshot: protocol.StateSnapshot | None = None
         # The bot goes online whenever the server says it is offline, unless it is
         # shutting down.
@@ -234,13 +239,18 @@ class DriverBot:
                     await self._sleep_unless_stopped(exc.seconds)
                     continue
                 else:
-                    return
+                    break
                 if not self._stopping.is_set():
                     self.stats.reconnects += 1
                     await self._backoff()
-            # Stopped while away from the server (a drop, a reconnect delay).
+            # Stopped without a confirmed offline: away from the server (a drop, a
+            # reconnect delay), before the snapshot of a new connection, or closed by
+            # the server during the shutdown.
             await self._say_goodbye()
         except BotStopped as exc:
+            # No goodbye after a fatal stop: the server refused the bot for good (or
+            # another connection holds the driver), and the stop is loud anyway:
+            # an ERROR or WARNING line, stop_reason in the report, --strict fails.
             self.stop_reason = exc.reason
         finally:
             self.connected = False
@@ -256,7 +266,7 @@ class DriverBot:
         """If the server may still hold the bot online (its last point is fresh, the
         reaper has not come yet), connect once more just to go offline: after a stop
         no bot may be left in drivers:last_seen (5.7)."""
-        if self.status != AVAILABLE and self._go_online_sent_at is None:
+        if not self._may_be_online:
             return
         # Bounded, so a slow or absent server never exceeds the runner's stop budget
         # (SHUTDOWN_TIMEOUT_S + 2); the budget covers connect, auth and go_offline.
@@ -268,14 +278,22 @@ class DriverBot:
             for task in (goodbye, deadline):
                 task.cancel()
             outcome, _ = await asyncio.gather(goodbye, deadline, return_exceptions=True)
+        if isinstance(outcome, Closed):
+            self._count_close(outcome.code)
         if isinstance(outcome, asyncio.CancelledError):
             self._left_online("could not go offline after the stop (timed out)")
         elif isinstance(outcome, _GOODBYE_FAILURES):
             self._left_online(f"could not go offline after the stop ({outcome!r})")
         elif outcome is not None:
             raise outcome  # a bug, not the server: keep its traceback
+        elif self._may_be_online:
+            # The session ended quietly, but without an "offline": closed by the
+            # server while waiting for it.
+            self._left_online("could not go offline after the stop (closed)")
 
     def _left_online(self, why: str) -> None:
+        """Give up going offline: counted once, and no further goodbye is tried."""
+        self._may_be_online = False
         self.stats.left_online += 1
         logger.warning("driver %d: %s; online until the reaper takes it", self.driver_id, why)
 
@@ -288,6 +306,7 @@ class DriverBot:
         conn = await self._connect()
         self.connected = True
         self.status = None
+        self._snapshot_received.clear()
         self._ping_scheduled_at = None
         self._go_online_sent_at = None
         receiver = asyncio.create_task(self._receive(conn))
@@ -379,7 +398,6 @@ class DriverBot:
         self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task[bool] | None
     ) -> bool:
         """Send auth and wait for the first snapshot. False if asked to stop meanwhile."""
-        self._snapshot_received.clear()
         await conn.send(protocol.auth(protocol.token_for(self.driver_id)))
         result = await self._wait(
             receiver,
@@ -463,6 +481,7 @@ class DriverBot:
                 self._misbehave_at = max(self._misbehave_at, earliest)
             self._start_driving()
             self._go_online_sent_at = now
+            self._may_be_online = True
             await conn.send(protocol.go_online())
             logger.info("driver %d: break over, going online", self.driver_id)
         elif (
@@ -522,15 +541,20 @@ class DriverBot:
         """Go offline (so the server does not wait for the reaper) and close with 1000.
 
         Also when a go_online is still unanswered: the server may be putting the
-        driver online right now, and go_offline comes after it.
+        driver online right now, and go_offline comes after it. Before the first
+        snapshot the connection is not authenticated yet: it only closes, and the
+        goodbye after it (see run) goes offline.
         """
         self._wants_online = False
         try:
             if receiver.done():
                 receiver.result()  # raises how the connection ended
-            if self.status == AVAILABLE or self._go_online_sent_at is not None:
+            if self._may_be_online and self._snapshot_received.is_set():
                 self._offline.clear()  # an older "offline" must not end the wait
-                await conn.send(protocol.go_offline())
+                # On a break go_offline is already on its way on this connection:
+                # sent when the break began, or on the snapshot of a reconnect.
+                if not self.on_break:
+                    await conn.send(protocol.go_offline())
                 result = await self._wait(
                     receiver, seconds=config.SHUTDOWN_TIMEOUT_S, event=self._offline
                 )
@@ -538,9 +562,13 @@ class DriverBot:
                     self._left_online("go_offline not confirmed")
             await conn.close(1000)
         except Closed as exc:
-            # The server closed first: nothing left to close, only to count.
-            code = protocol.ABNORMAL_CLOSURE if exc.code is None else exc.code
-            self.stats.closes[code] += 1
+            if protocol.classify_close(exc.code) is not CloseVerdict.RECONNECT:
+                # Closed for good: a goodbye would be refused or, after 4409, take
+                # the driver offline from the connection that has taken it over.
+                self._on_closed(exc.code)  # counts, logs and raises BotStopped
+            # The server closed first: nothing left to close, only to count. Not
+            # confirmed offline, the bot still says goodbye (see run).
+            code = self._count_close(exc.code)
             logger.info("driver %d: closed with %d while stopping", self.driver_id, code)
 
     # --- Messages from the server ---------------------------------------------
@@ -570,10 +598,12 @@ class DriverBot:
         if snapshot.status == AVAILABLE:
             self._online.set()
             self._go_online_sent_at = None
+            self._may_be_online = True
         else:
             self._online.clear()
         if snapshot.status == OFFLINE:
             self._offline.set()
+            self._may_be_online = False
         else:
             self._offline.clear()
         self._snapshot_received.set()
@@ -584,6 +614,7 @@ class DriverBot:
         if snapshot.status == OFFLINE and self._wants_online:
             if self._go_online_sent_at is None:
                 self._go_online_sent_at = self._clock.monotonic()
+            self._may_be_online = True
             await conn.send(protocol.go_online())
 
     def _on_pong(self) -> None:
@@ -607,8 +638,7 @@ class DriverBot:
 
     def _on_closed(self, code: int | None) -> None:
         """Count the close; raise BotStopped unless the bot should reconnect."""
-        code = protocol.ABNORMAL_CLOSURE if code is None else code
-        self.stats.closes[code] += 1
+        code = self._count_close(code)
         match protocol.classify_close(code):
             case CloseVerdict.FATAL:
                 level = _STOP_LOG_LEVEL[code]
@@ -622,6 +652,12 @@ class DriverBot:
                 raise BotStopped(f"closed {code}")
             case CloseVerdict.RECONNECT:
                 logger.warning("driver %d: closed with %d, reconnecting", self.driver_id, code)
+
+    def _count_close(self, code: int | None) -> int:
+        """Count a close by the server; a connection lost without a frame is 1006."""
+        code = protocol.ABNORMAL_CLOSURE if code is None else code
+        self.stats.closes[code] += 1
+        return code
 
     async def _backoff(self) -> None:
         delay = reconnect_delay(self._failed_attempts, self._rng)
