@@ -2,8 +2,9 @@
 
 import json
 import random
+from types import SimpleNamespace
 
-from sim.driver_bot import DriverBot
+from sim.driver_bot import BotStats, DriverBot
 from sim.geo import Point
 from sim.latency import LatencyRecorder
 from sim.routes import Route
@@ -47,6 +48,27 @@ def make_latency(values: list[float]) -> LatencyRecorder:
     for value in values:
         recorder.record(value)
     return recorder
+
+
+def make_bot_view(
+    *,
+    flaky: bool = False,
+    stop_reason: str | None = None,
+    connected: bool = True,
+    status: str | None = "available",
+    on_break: bool = False,
+    **stats,
+) -> SimpleNamespace:
+    """What the report and the strict checks read from a bot: its stats (by default
+    of a bot that started and got online) and a few state fields."""
+    return SimpleNamespace(
+        stats=BotStats(**({"started": True, "went_online": True} | stats)),
+        flaky=flaky,
+        stop_reason=stop_reason,
+        connected=connected,
+        status=status,
+        on_break=on_break,
+    )
 
 
 def make_bot(

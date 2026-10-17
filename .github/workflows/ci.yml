@@ -90,7 +90,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: core/coverage.xml
           flags: core
-          # Only this report, not every coverage file found in the repository.
+          # Only this report, not every coverage file found in the repository (in
+          # every upload below too).
           disable_search: true
           # An outage of Codecov must not turn CI red.
           fail_ci_if_error: false
@@ -130,7 +131,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: realtime/coverage.xml
           flags: realtime
-          # Only this report, not every coverage file found in the repository.
           disable_search: true
           # An outage of Codecov must not turn CI red.
           fail_ci_if_error: false
@@ -158,7 +158,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: simulator/coverage.xml
           flags: simulator
-          # Only this report, not every coverage file found in the repository.
           disable_search: true
           # An outage of Codecov must not turn CI red.
           fail_ci_if_error: false
@@ -212,7 +211,6 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: realtime/coverage.xml
           flags: realtime
-          # Only this report, not every coverage file found in the repository.
           disable_search: true
           # An outage of Codecov must not turn CI red.
           fail_ci_if_error: false

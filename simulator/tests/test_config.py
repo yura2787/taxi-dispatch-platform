@@ -21,7 +21,9 @@ def margin_m(inner: BoundingBox, outer: BoundingBox) -> float:
 
 
 class TestServerLimits:
-    def test_no_point_is_throttled_even_with_jitter(self):
+    def test_point_after_a_late_tick_is_not_throttled(self):
+        # Ticks keep a fixed schedule: one late by up to a server interval, then one on
+        # time, are still that interval apart.
         assert config.LOCATION_INTERVAL_S >= 2 * config.SERVER_LOCATION_MIN_INTERVAL_S
 
     def test_pings_keep_an_idle_connection_open_with_room_to_spare(self):

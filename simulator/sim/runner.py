@@ -33,7 +33,8 @@ ConnectFactory = Callable[[int], Connect]
 # A fresh snapshot of the server's metrics, or ServerMetricsUnavailable.
 MetricsSource = Callable[[], Awaitable[Snapshot]]
 
-# Errors from the server that mean the bots did something wrong (--strict).
+# Errors from the server that mean the bots did something wrong (--strict): they
+# broke the protocol or moved impossibly, that is, a bug of the simulator.
 _BOT_FAULTS = {ErrorVerdict.REJECTED_LOCATION, ErrorVerdict.BUG}
 
 
@@ -188,8 +189,9 @@ async def _server_part(
 ) -> tuple[list[str], list[str]]:
     """The server lines of the report and the --strict failures (9.1 d and more).
 
-    Without metrics the run does not fail on its own, only under --strict: then the
-    one check that the server really took the points is missing.
+    Metrics that are unavailable are a failure too (9.2 asks only for the line in the
+    report): without them the one check that the server really took the points is
+    missing.
     """
     after = await _snapshot(source)
     try:
@@ -231,8 +233,9 @@ def server_failures(
     if closes:
         failures.append(f"drivers closed by the server: {closes}")
     # A connection that ends without a goodbye (a drop, a close by the server, a
-    # timeout, a cancelled bot) may take the points still in its socket with it;
-    # those cases are failures of their own when they are not the bots' drops.
+    # handshake timeout, a cancelled bot) may take a point still in its socket with
+    # it: one per such connection is tolerated, as a point goes out only every 2 s.
+    # Apart from the bots' own drops, those endings fail the run anyway.
     may_lose = totals.drops + totals.reconnects + cancelled
     missing = totals.locations_sent - sum(change.updates.values())
     if missing > may_lose:

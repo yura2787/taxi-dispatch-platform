@@ -171,7 +171,7 @@ def _quantile_text(q: float, buckets: Mapping[float, float]) -> str:
 
 def report(change: Snapshot) -> list[str]:
     """The server part of the summary."""
-    # Throttled points are shown on their own line, outside the share.
+    # Throttled points are shown next to the refused ones, outside the share.
     total = change.accepted + change.refused
     refused_share = change.refused / total if total else 0.0
     quantiles = " ".join(

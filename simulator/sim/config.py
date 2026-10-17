@@ -2,7 +2,10 @@
 
 Values that must match the server are copies, marked "keep in sync with
 realtime/app/config.py": the simulator is an external client and imports nothing
-from realtime. A drift between them is caught by the e2e-smoke job in CI.
+from realtime. The e2e-smoke job in CI catches a drift of the protocol, not of these
+copies: the bots stay well inside the limits and the area either way, and
+tests/test_config.py checks the relations between the copies only. Change both
+sides together.
 """
 
 import os
@@ -70,8 +73,10 @@ BREAK_DURATION_S = (60, 300)
 # How often a flaky bot drops its connection or falls silent.
 FLAKY_EVERY_S = (120, 600)
 
-# A dropped bot is away this long; below 30 s the server returns it to GEO with
-# its first point, above it the reaper has taken it offline.
+# A dropped bot is away this long. Back within SERVER_DRIVER_SILENCE_S (30 s), the
+# server returns it to GEO with its first point; the reaper, every 10 s, takes it
+# offline between 30 and 40 s after its last point, and after that the bot goes
+# online again.
 DROP_DURATION_S = (5, 60)
 
 # A silent bot sends no points this long: longer than the reaper can wait
@@ -100,9 +105,10 @@ SHUTDOWN_TIMEOUT_S = 5
 # the previous ones left. Then the bot gives up (left_online) and ends by itself.
 BOT_STOP_BUDGET_S = SHUTDOWN_TIMEOUT_S + CLOSE_TIMEOUT_S
 
-# The runner waits this long for the bots after the stop (5.7: SHUTDOWN_TIMEOUT_S + 2),
-# then cancels the rest. The second above the bots' own budget is for an event loop
-# busy with 1000 bots: a bot is either done (maybe left online) or cancelled, not both.
+# The runner waits this long for the bots after the stop, then cancels the rest: 7 s,
+# as 5.7 asks (SHUTDOWN_TIMEOUT_S + 2). The second above the bots' own budget is for
+# an event loop busy with 1000 bots: a bot is either done (maybe left online) or
+# cancelled, not both.
 STOP_BUDGET_S = BOT_STOP_BUDGET_S + 1
 
 

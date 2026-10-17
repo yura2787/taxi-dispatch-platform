@@ -5,14 +5,18 @@ Life of a bot (ТЗ 08, section 5):
 2. every LOCATION_INTERVAL_S send where the car is, every PING_INTERVAL_S a ping;
 3. on a close: stop for good (4401, 4403, 4409, 1008, 1009) or reconnect after a
    random delay that doubles with every failed attempt ("full jitter");
-4. on stop: go offline, wait for the snapshot, close with 1000.
+4. on stop: go offline, wait for the snapshot, close with 1000; if the server may
+   still hold the bot online without a connection to say so on (a drop, a reconnect,
+   a close during the stop), one goodbye connection just to go offline. All of it
+   within BOT_STOP_BUDGET_S; a bot that cannot go offline counts as left_online.
 
 Every 5-20 minutes a bot takes a break: offline for a few minutes, the connection
 open, only pings. A flaky bot (a share of them) now and then drops its connection
 without a close frame or falls silent: live load for the reaper and for reconnects.
 
-The car itself (Car + the drive task) lives for the whole bot, not per connection:
-it keeps driving while the bot reconnects, so the bot never jumps.
+The car (Car) lives for the whole bot, not per connection: it keeps driving while
+the bot reconnects, so the bot never jumps. The drive task stops for a break and
+starts again after it, from where the car was parked.
 """
 
 import asyncio
@@ -193,8 +197,8 @@ class DriverBot:
         # knows it has to go offline.
         self._may_be_online = False
         self._last_snapshot: protocol.StateSnapshot | None = None
-        # The bot goes online whenever the server says it is offline, unless it is
-        # shutting down.
+        # The bot goes online whenever the server says it is offline, except on a break
+        # and once it is stopping.
         self._wants_online = True
         self._last_ts = 0
         self._ping_scheduled_at: float | None = None
@@ -307,7 +311,9 @@ class DriverBot:
         logger.warning("driver %d: %s; online until the reaper takes it", self.driver_id, why)
 
     async def _session(self, *, goodbye: bool = False) -> None:
-        """Returns once the bot has stopped; raises when the connection ends.
+        """Returns once the bot has stopped. Raises ConnectFailed if it cannot connect,
+        and when the connection ends: Closed (by the server), Dropped (on purpose),
+        HandshakeTimeout, or BotStopped (refused for good).
 
         A goodbye session only authenticates and goes offline.
         """
@@ -374,7 +380,7 @@ class DriverBot:
                 task.cancel()
             await asyncio.gather(*helpers, return_exceptions=True)
         if receiver in done:
-            receiver.result()  # raises: the receiver ends only with a close or a stop
+            receiver.result()  # it only ends by raising: a close, a fatal stop or a bug
         if event_task is not None and event_task in done:
             return "event"
         if stopping is not None and stopping in done:

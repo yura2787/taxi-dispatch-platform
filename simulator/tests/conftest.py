@@ -176,7 +176,8 @@ class FakeServer:
         self.close_after_auth: int | str | None = None
         # This many connection attempts fail before one succeeds.
         self.refuse_connections = 0
-        # Connection attempts never finish (a server that accepts no TCP at all).
+        # Connection attempts never finish, as when the packets go nowhere (e.g. a
+        # firewall drops them); a closed port would refuse at once.
         self.hang_connections = False
         self.connections: list[FakeConnection] = []
         self.connect_attempts = 0

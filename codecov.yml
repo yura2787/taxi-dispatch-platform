@@ -10,12 +10,13 @@ comment:
 
 coverage:
   status:
-    # The lines a pull request adds or changes must be covered by tests.
+    # At least 70 % of the lines a pull request adds or changes must be covered,
+    # with 2 % of slack.
     patch:
       default:
         target: 70%
         threshold: 2%
-    # Overall coverage may drift a little, but cannot quietly fall.
+    # Overall coverage may fall by at most 2 % against the base commit.
     project:
       default:
         target: auto

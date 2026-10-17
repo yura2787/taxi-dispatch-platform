@@ -1,5 +1,7 @@
 """DriverBot against an in-memory server and OSRM, on virtual time: the handshake,
-driving, pings, reactions to server errors and closes, reconnects and shutdown."""
+driving, pings, reactions to server errors and closes, reconnects, the shutdown and
+the goodbye connection, breaks, flaky drops and silences, and that the same seed
+and id make the same choices."""
 
 import asyncio
 import itertools
@@ -1099,7 +1101,7 @@ class TestBreaks:
 
         assert osrm.routes[routes_before].geometry[0] == parked
 
-    async def test_bot_that_first_connects_on_a_break_is_not_online_yet(
+    async def test_reconnect_during_a_break_does_not_count_as_going_online(
         self, server, osrm, clock, short_breaks
     ):
         bot = make_bot(server=server, osrm=osrm, clock=clock)
@@ -1113,6 +1115,7 @@ class TestBreaks:
         bot.stop()
         await task
 
+        assert len(server.connections) == 2  # it did reconnect, on the break
         assert reconnected_on_break is False
 
     async def test_reconnect_during_a_break_stays_offline(self, server, osrm, clock, short_breaks):
@@ -1230,7 +1233,7 @@ class TestBreaks:
         assert bot.stats.breaks == 1
         assert bot.stats.drops == 0
 
-    async def test_break_waits_until_the_bot_is_online(
+    async def test_no_break_while_the_server_says_offline(
         self, server, osrm, clock, short_breaks, timeline
     ):
         bot = make_bot(server=server, osrm=osrm, clock=clock)
@@ -1551,7 +1554,8 @@ class TestDriveFailure:
 class TestDeterminism:
     async def drive(self, *, seed: int, driver_id: int, seconds: float) -> list:
         """Everything one bot sends over a run, on a fresh clock: the moment, the type
-        and the data of each message (ts left out: it is the wall clock)."""
+        and the data of each message (ts left out: it is the wall clock). The bot is
+        not flaky: drops and silences are left out of these runs."""
         clock = FakeClock()
         server = FakeServer()
         messages = record_messages(server, clock)

@@ -10,6 +10,7 @@ from sim.server_metrics import (
     FETCH_ATTEMPTS,
     ServerMetricsUnavailable,
     Snapshot,
+    _quantile_text,
     fetch,
     histogram_quantile,
     parse,
@@ -247,6 +248,21 @@ class TestReport:
         assert lines[3] == (
             "location_processing_seconds (bucket estimate): p50=277.8ms p95=812.5ms p99=>1000.0ms"
         )
+
+    @pytest.mark.parametrize(
+        ("buckets", "text"),
+        [
+            # Exactly the largest bucket's count reaches p99: inside it, no ">".
+            ({0.5: 90, 1.0: 99, INF: 100}, "1000.0ms"),
+            ({0.5: 0, 1.0: 0, INF: 100}, ">1000.0ms"),  # everything beyond
+            ({INF: 100}, "n/a"),  # nothing to interpolate in
+            # A torn scrape: the 1.0 bucket looks lower than the 0.5 one.
+            ({0.5: 99, 1.0: 98, INF: 100}, "500.0ms"),
+        ],
+        ids=["right_on_the_edge", "all_beyond", "only_inf", "torn"],
+    )
+    def test_p99_text_at_the_edges(self, buckets, text):
+        assert _quantile_text(0.99, buckets) == text
 
     def test_run_without_points(self):
         lines = report(Snapshot())

@@ -16,7 +16,7 @@ from sim.geo import (
 from tests.factories import CENTRE
 
 # The railway station of Chernivtsi; the same pair as in realtime's tests.
-STATION = Point(lat=48.3036, lon=25.9325)
+STATION = Point(lat=48.2668, lon=25.9306)
 
 
 class TestHaversine:
@@ -24,7 +24,7 @@ class TestHaversine:
         assert haversine_m(Point(0, 0), Point(1, 0)) == pytest.approx(111_195, rel=1e-4)
 
     def test_distance_between_two_city_places(self):
-        assert haversine_m(CENTRE, STATION) == pytest.approx(1_300, rel=0.05)
+        assert haversine_m(CENTRE, STATION) == pytest.approx(2_840, rel=0.01)
 
     def test_distance_is_symmetric(self):
         assert haversine_m(CENTRE, STATION) == pytest.approx(haversine_m(STATION, CENTRE))

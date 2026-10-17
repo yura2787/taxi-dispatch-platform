@@ -5,8 +5,9 @@
 
 Without --duration the bots run until SIGINT/SIGTERM (Ctrl+C). The handlers matter
 in Docker: the process is PID 1 there, and PID 1 ignores signals it has no handler
-for, so the bots would be killed without going offline. Exit code: 0, or 1 when
---strict finds the run unclean, 2 for bad arguments.
+for, so the bots would be killed without going offline. Exit code: 0; 1 when
+--strict finds the run unclean, or when a second Ctrl+C stops it without waiting for
+the bots; 2 for bad arguments.
 """
 
 import argparse
@@ -75,8 +76,11 @@ def parse_args(argv: list[str] | None) -> runner.RunOptions:
     run.add_argument(
         "--strict",
         action="store_true",
-        help="exit with 1 if a bot never got online, stopped for good or was refused, or "
-        "the server accepted no points or its metrics are unavailable (CI)",
+        help="exit with 1 on any anomaly (CI): a bot that never started, never got "
+        "online, stopped for good, was cancelled or may be left online; any error the "
+        "bots caused, close, failed connection, missed pong, unknown message or OSRM "
+        "failure; points refused or lost; no points accepted or no server metrics; a "
+        "crash of the status line or the loop lag probe",
     )
     args = parser.parse_args(argv)
     return runner.RunOptions(

@@ -1,4 +1,5 @@
-"""The real clock, and the virtual one (FakeClock) that every other test relies on."""
+"""The real clock, and the virtual one (FakeClock) that the tests of the bots and the
+runner rely on."""
 
 import asyncio
 

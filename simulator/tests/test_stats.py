@@ -3,26 +3,14 @@
 from collections import Counter
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 
 from sim.driver_bot import BotStats
 from sim.stats import Conditions, StatusLine, Totals, ms, summary
-from tests.factories import make_latency
+from tests.factories import make_bot_view, make_latency
 
 STARTED = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
-
-
-def make_bot_view(*, stop_reason=None, connected=True, status="available", on_break=False, **stats):
-    """What the report reads from a bot: its stats and a few state fields."""
-    return SimpleNamespace(
-        stats=BotStats(**stats),
-        stop_reason=stop_reason,
-        connected=connected,
-        status=status,
-        on_break=on_break,
-    )
 
 
 def make_conditions(**overrides) -> Conditions:
@@ -63,10 +51,10 @@ class TestTotals:
                 closes=Counter({4000: 1}),
                 reconnects=1,
                 rtt=make_latency([0.2]),
-                started=True,
+                went_online=False,
                 stop_reason="closed 4403",
             ),
-            make_bot_view(),  # stopped during the ramp-up, before it started
+            make_bot_view(started=False, went_online=False),  # stopped in the ramp-up
         ]
 
         totals = Totals.of(bots)
@@ -76,17 +64,17 @@ class TestTotals:
         assert totals.closes == Counter({4000: 1})
         assert totals.reconnects == 1
         assert (totals.rtt.count, totals.rtt.max) == (2, 0.2)
-        assert totals.never_online == 1
+        assert (totals.never_started, totals.never_online) == (1, 1)
         assert totals.stopped == Counter({"closed 4403": 1})
 
     def test_totals_have_a_place_for_every_counter_of_bot_stats(self):
-        # Otherwise the summary would fail only at the end of a long run.
+        # Otherwise adding them up would crash the first status line of a run.
         counters = {f.name for f in fields(BotStats) if f.type not in ("bool", bool)}
 
         assert counters <= {f.name for f in fields(Totals)}
 
     def test_every_counter_of_bot_stats_is_added_up(self):
-        # Field by field: a counter added to BotStats is summed without more code.
+        # Field by field: a counter added to BotStats needs only its field in Totals.
         bots = [make_bot_view(osrm_failures=2, left_online=1), make_bot_view(osrm_failures=3)]
 
         totals = Totals.of(bots)

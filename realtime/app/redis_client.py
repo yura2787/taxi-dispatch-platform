@@ -1,10 +1,9 @@
 """The Redis client of the realtime processes (the gateway and the dispatcher).
 
-The pool blocks: when every connection is busy, a command waits up to
-REDIS_POOL_TIMEOUT_S for a free one. redis-py's default pool fails at once with
-"Too many connections" instead, and a burst (1000 drivers going offline together,
-everyone reconnecting after a gateway restart) closed hundreds of WebSockets with
-1011 and left those drivers online until the reaper.
+The pool blocks: when all REDIS_MAX_CONNECTIONS are busy, a command waits up to
+REDIS_POOL_TIMEOUT_S for a free one instead of failing at once with "Too many
+connections" (redis-py's default pool). A burst of commands queues up for a moment;
+only a pool busy for longer than the timeout fails the command.
 """
 
 from redis.asyncio import BlockingConnectionPool, Redis

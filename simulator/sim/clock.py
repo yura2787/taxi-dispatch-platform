@@ -3,8 +3,10 @@
 - now_ms(): wall clock, unix milliseconds. Only for `ts` of a location: the server
   compares it with its own wall clock.
 - monotonic(): seconds that never go back. For schedules and measured latencies.
-- sleep(): every wait of a bot goes through it, so a test can skip minutes of
-  driving in milliseconds.
+- sleep(): the waits of the bots and the runner go through it (ticks, pings, breaks,
+  backoff, the handshake and stop deadlines), so a test can skip minutes of driving
+  in milliseconds. Not all waits: the OSRM and server metrics request timeouts and
+  the websockets connect and close timeouts run on the event loop's own clock.
 """
 
 import asyncio

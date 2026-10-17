@@ -5,16 +5,15 @@ import asyncio
 import logging
 import math
 from collections import Counter
-from types import SimpleNamespace
 
 import pytest
 
 from sim import config, runner
-from sim.driver_bot import BotStats
 from sim.runner import RunOptions, flaky_ids, server_failures, strict_failures
 from sim.server_metrics import ServerMetricsUnavailable, Snapshot
 from sim.stats import Totals
 from tests.conftest import FakeServer
+from tests.factories import make_bot_view
 
 INF = math.inf
 
@@ -196,7 +195,6 @@ class TestStop:
         await clock.sleep(10)
         stop.set()
         await clock.sleep(1)  # the bots have sent go_offline and wait for the answer
-        before = asyncio.all_tasks() - {asyncio.current_task(), run}
 
         for _ in range(cancels):
             run.cancel()
@@ -204,10 +202,11 @@ class TestStop:
         with pytest.raises(asyncio.CancelledError):
             await run
 
-        # Everything the run started is finished, not left for asyncio.run to reap;
-        # only the virtual clock's own scheduler may still be there.
-        left = {task for task in before if not task.done()}
-        assert left <= {clock.scheduler}
+        # Everything the run started is finished, not left for asyncio.run to reap,
+        # also what it started while being cancelled; only the virtual clock's own
+        # scheduler may still be there.
+        left = {task for task in asyncio.all_tasks() if not task.done()}
+        assert left - {asyncio.current_task()} <= {clock.scheduler}
         assert all(server.connections[-1].aborted for server in city.servers.values())
 
 
@@ -351,22 +350,22 @@ class TestStrict:
         assert result.failures == [f"server errors caused by the bots: {{'{code}': 1}}"]
 
     def test_not_online_of_silent_flaky_bots_is_not_a_failure(self):
-        bot = bot_view(errors=Counter(not_online=3), flaky=True)
+        bot = make_bot_view(errors=Counter(not_online=3), flaky=True)
 
         failures = strict_failures([bot])
 
         assert failures == []
 
     def test_not_online_of_a_steady_bot_fails_even_among_flaky_ones(self):
-        flaky = bot_view(errors=Counter(not_online=3), flaky=True)
-        steady = bot_view(errors=Counter(not_online=1))
+        flaky = make_bot_view(errors=Counter(not_online=3), flaky=True)
+        steady = make_bot_view(errors=Counter(not_online=1))
 
         failures = strict_failures([flaky, steady])
 
         assert failures == ["server errors caused by the bots: {'not_online': 1}"]
 
     def test_bot_that_never_started_is_a_failure(self):
-        bot = bot_view(started=False, went_online=False)
+        bot = make_bot_view(started=False, went_online=False)
 
         failures = strict_failures([bot])
 
@@ -374,7 +373,7 @@ class TestStrict:
 
     def test_not_online_without_flaky_bots_is_a_failure(self):
         # Nobody falls silent: the reaper had no reason to take a bot offline.
-        bot = bot_view(errors=Counter(not_online=1))
+        bot = make_bot_view(errors=Counter(not_online=1))
 
         failures = strict_failures([bot])
 
@@ -402,26 +401,16 @@ class TestStrict:
         ],
     )
     def test_anything_the_server_closed_or_did_not_answer_is_a_failure(self, stats, failure):
-        bot = bot_view(flaky=True, **stats)
+        bot = make_bot_view(flaky=True, **stats)
 
         failures = strict_failures([bot])
 
         assert failures == [failure]
 
     def test_clean_bot_has_no_failures(self):
-        failures = strict_failures([bot_view(locations_sent=100)])
+        failures = strict_failures([make_bot_view(locations_sent=100)])
 
         assert failures == []
-
-
-def bot_view(*, flaky: bool = False, **stats) -> SimpleNamespace:
-    """What the strict checks read from a bot (by default one that started and got
-    online)."""
-    return SimpleNamespace(
-        stats=BotStats(**({"started": True, "went_online": True} | stats)),
-        stop_reason=None,
-        flaky=flaky,
-    )
 
 
 @pytest.fixture
@@ -482,14 +471,14 @@ class TestServerFailures:
     def test_clean_change_has_no_failures(self):
         change = Snapshot(updates={"accepted": 10})
 
-        failures = server_failures(change, [bot_view(locations_sent=10)])
+        failures = server_failures(change, [make_bot_view(locations_sent=10)])
 
         assert failures == []
 
     def test_refused_points_are_a_failure(self):
         change = Snapshot(updates={"accepted": 8, "rejected_jump": 1, "rejected_offline": 1})
 
-        failures = server_failures(change, [bot_view(locations_sent=10)])
+        failures = server_failures(change, [make_bot_view(locations_sent=10)])
 
         assert failures == [
             "points refused by the server: {'rejected_jump': 1, 'rejected_offline': 1}"
@@ -497,7 +486,7 @@ class TestServerFailures:
 
     def test_offline_points_of_silent_flaky_bots_are_not_a_failure(self):
         change = Snapshot(updates={"accepted": 9, "rejected_offline": 1})
-        bot = bot_view(locations_sent=10, flaky=True, errors=Counter(not_online=1))
+        bot = make_bot_view(locations_sent=10, flaky=True, errors=Counter(not_online=1))
 
         failures = server_failures(change, [bot])
 
@@ -507,7 +496,7 @@ class TestServerFailures:
         # Every point refused as offline gets a not_online back; one more refusal
         # than the bots heard of (or lost in a drop) is not a silent flaky bot.
         change = Snapshot(updates={"accepted": 7, "rejected_offline": 3})
-        bot = bot_view(locations_sent=10, flaky=True, errors=Counter(not_online=1), drops=1)
+        bot = make_bot_view(locations_sent=10, flaky=True, errors=Counter(not_online=1), drops=1)
 
         failures = server_failures(change, [bot])
 
@@ -516,14 +505,14 @@ class TestServerFailures:
     def test_drivers_closed_by_the_server_are_a_failure(self):
         change = Snapshot(updates={"accepted": 10}, closes={"1011": 2, "4409": 0})
 
-        failures = server_failures(change, [bot_view(locations_sent=10)])
+        failures = server_failures(change, [make_bot_view(locations_sent=10)])
 
         assert failures == ["drivers closed by the server: {'1011': 2}"]
 
     def test_points_that_never_reached_the_server_are_a_failure(self):
         change = Snapshot(updates={"accepted": 7})
 
-        failures = server_failures(change, [bot_view(locations_sent=10)])
+        failures = server_failures(change, [make_bot_view(locations_sent=10)])
 
         assert failures == ["3 points sent by the bots never reached the server"]
 
@@ -540,7 +529,7 @@ class TestServerFailures:
         self, lost_with, stats, cancelled
     ):
         # A connection ending without a goodbye may take the points in its socket.
-        bot = bot_view(locations_sent=10, **stats)
+        bot = make_bot_view(locations_sent=10, **stats)
 
         exactly_at_the_limit = server_failures(
             Snapshot(updates={"accepted": 8}), [bot], cancelled=cancelled
@@ -555,14 +544,14 @@ class TestServerFailures:
         # browser during the run, so the surplus covers points the bots lost.
         change = Snapshot(updates={"accepted": 15})
 
-        failures = server_failures(change, [bot_view(locations_sent=10)])
+        failures = server_failures(change, [make_bot_view(locations_sent=10)])
 
         assert failures == []
 
     def test_several_failures_are_all_reported(self):
         change = Snapshot(updates={"accepted": 0, "rejected_jump": 1}, closes={"1011": 1})
 
-        failures = server_failures(change, [bot_view(locations_sent=5)])
+        failures = server_failures(change, [make_bot_view(locations_sent=5)])
 
         assert failures == [
             "the server accepted no points",
@@ -575,7 +564,7 @@ class TestServerFailures:
         # --flaky-share 0.2 with 2 bots: no bot is flaky, so nothing is tolerated.
         change = Snapshot(updates={"accepted": 9, "rejected_offline": 1})
 
-        failures = server_failures(change, [bot_view(locations_sent=10, flaky=False)])
+        failures = server_failures(change, [make_bot_view(locations_sent=10, flaky=False)])
 
         assert failures == ["points refused by the server: {'rejected_offline': 1}"]
 

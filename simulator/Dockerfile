@@ -12,7 +12,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# --frozen: install exactly what uv.lock says, fail if it is out of date.
+# --frozen: install exactly what uv.lock says, without checking it against
+# pyproject.toml (that is --locked).
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
 
