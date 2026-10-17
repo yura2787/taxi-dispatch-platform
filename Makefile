@@ -59,18 +59,24 @@ load_drivers = $(or $(if $(call given,drivers),$(drivers)),1000)
 load_duration = $(or $(if $(call given,duration),$(duration)),300)
 load_flaky = $(or $(if $(call given,flaky),$(flaky)),0)
 # The trap comes first, so dev realtime is restored whatever fails or is interrupted
-# from then on, and exactly once (INT/TERM only exit, EXIT restores). nginx is
-# started here: --no-deps below starts nothing, and a dependency started by `run`
-# would come from docker-compose.yml alone, i.e. realtime with --reload again.
+# from then on, and exactly once (INT/TERM only exit, EXIT restores); a failed restore
+# is shouted, and the run's own exit code (--strict, Ctrl+C) is kept. nginx is started without its dependencies (it resolves
+# upstreams per request), and --no-deps below starts nothing: a dependency started
+# by `run` would come from docker-compose.yml alone, i.e. realtime with --reload.
+# --strict: the summary is printed either way, and the exit code tells a clean run.
 loadtest: check-osrm-map
 	docker compose --profile sim build simulator
-	@trap 'docker compose up -d --wait realtime' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM; \
-	$(LOAD_COMPOSE) up -d --wait realtime nginx && \
+	@trap 'rc=$$?; docker compose up -d --wait realtime || \
+		{ echo "realtime is still in load test mode: run make up" >&2; [ $$rc -ne 0 ] || rc=1; }; \
+		exit $$rc' EXIT; \
+	trap 'exit 130' INT; trap 'exit 143' TERM; \
+	$(LOAD_COMPOSE) up -d --wait redis realtime && \
+	docker compose up -d --no-deps nginx && \
 	docker compose exec realtime python -m app.devtools seed-drivers \
 		--count $(load_drivers) --first-id $(first) && \
 	docker compose --profile sim run --rm --no-deps simulator python -m sim run \
 		--drivers $(load_drivers) --first-id $(first) --flaky-share $(load_flaky) \
-		--duration $(load_duration)
+		--duration $(load_duration) --strict
 
 check-osrm-map:
 	@if [ ! -f $(OSRM_STAMP) ]; then \

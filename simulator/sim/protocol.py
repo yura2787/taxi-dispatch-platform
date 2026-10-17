@@ -87,9 +87,11 @@ ServerMessage = StateSnapshot | Pong | ServerError | UnknownMessage
 
 
 def parse_server_message(raw: str) -> ServerMessage:
+    message_type = None
     try:
         message = json.loads(raw)
-        message_type, data = message["type"], message["data"]
+        message_type = message["type"]
+        data = message["data"]
         if message_type == "state_snapshot":
             position = data["position"]
             point = None if position is None else Point(position["lat"], position["lon"])
@@ -99,7 +101,8 @@ def parse_server_message(raw: str) -> ServerMessage:
         if message_type == "error":
             return ServerError(code=data["code"])
     except (ValueError, KeyError, TypeError):
-        return UnknownMessage(type=None)
+        # A known type with broken data keeps its type: the log says what drifted.
+        return UnknownMessage(type=message_type if isinstance(message_type, str) else None)
     return UnknownMessage(type=str(message_type))
 
 

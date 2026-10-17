@@ -363,6 +363,22 @@ class TestOsrmUnavailable:
             base = min(base * 2, config.OSRM_RETRY_MAX_S)
         assert gaps[-1] >= config.OSRM_RETRY_MAX_S / 2
 
+    async def test_failures_are_counted_and_warned_once_per_outage(
+        self, server, osrm, clock, caplog
+    ):
+        caplog.set_level(logging.DEBUG, logger="sim.driver_bot")
+        osrm.failure = OsrmUnavailable("down")
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+
+        await run(bot, clock, 60)
+
+        # The start position and every route retry; one WARNING for the retries.
+        assert bot.stats.osrm_failures >= 5
+        retries = [r for r in caplog.records if "no route" in r.getMessage()]
+        warnings = [r for r in retries if r.levelno == logging.WARNING]
+        assert len(retries) > len(warnings) == 1
+        assert any("no road for the start" in r.getMessage() for r in caplog.records)
+
     async def test_drives_once_osrm_is_back(self, server, osrm, clock):
         osrm.failure = OsrmUnavailable("down")
         bot = make_bot(server=server, osrm=osrm, clock=clock)
@@ -383,15 +399,30 @@ class TestOsrmUnavailable:
 
 
 class TestPing:
-    async def test_ping_every_20_seconds(self, server, osrm, clock):
+    async def test_ping_every_20_seconds_from_a_phase_of_its_own(self, server, osrm, clock):
         messages = record_messages(server, clock)
         bot = make_bot(server=server, osrm=osrm, clock=clock)
 
         await run(bot, clock, 101)
 
         pings = times_of(messages, "ping")
-        assert len(pings) == 5
-        assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * 4, abs=0.01)
+        # The first within one interval (the idle timeout is 45 s), then every 20 s.
+        assert 0 < pings[0] <= config.PING_INTERVAL_S
+        assert len(pings) >= 5
+        assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * (len(pings) - 1), abs=0.01)
+
+    async def test_bots_ping_at_different_moments(self, osrm, clock):
+        first_pings = set()
+        for driver_id in range(1, 6):
+            server = FakeServer()
+            messages = record_messages(server, clock)
+            bot = make_bot(server=server, osrm=osrm, clock=clock, driver_id=driver_id)
+            started = clock.elapsed
+            await run(bot, clock, 25)
+            first_pings.add(round(times_of(messages, "ping")[0] - started, 3))
+
+        # Spread over the interval, not all at session start + 20 s.
+        assert len(first_pings) == 5
 
     async def test_unanswered_ping_is_counted_and_replaced_by_the_next(self, server, osrm, clock):
         server.silent.add("ping")
@@ -402,38 +433,45 @@ class TestPing:
 
         # Still one ping per interval: a missing pong neither stops nor speeds them up.
         pings = times_of(messages, "ping")
-        assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * 4, abs=0.01)
-        assert bot.stats.pongs_missed == 4
+        assert gaps(pings) == pytest.approx([config.PING_INTERVAL_S] * (len(pings) - 1), abs=0.01)
+        assert bot.stats.pongs_missed == len(pings) - 1
         assert bot.stats.rtt_s == []
-
-    async def test_pong_after_a_missed_one_is_timed_from_the_newest_ping(self, server, osrm, clock):
-        # The first ping gets no pong; the second one, answered 2 s late, is the
-        # only one in flight, so the sample is 2 s and not 22 s.
-        server.silent.add("ping")
-        bot = make_bot(server=server, osrm=osrm, clock=clock)
-        task = asyncio.create_task(bot.run())
-        await clock.sleep(2 * config.PING_INTERVAL_S + 2)
-
-        server.connections[0].push("pong")
-        await clock.sleep(1)
-        bot.stop()
-        await task
-
-        assert bot.stats.pongs_missed == 1
-        assert bot.stats.rtt_s == [pytest.approx(2, abs=0.01)]
 
     async def test_rtt_is_measured_from_the_scheduled_moment(self, server, osrm, clock):
         server.silent.add("ping")
+        messages = record_messages(server, clock)
         bot = make_bot(server=server, osrm=osrm, clock=clock)
         task = asyncio.create_task(bot.run())
-        await clock.sleep(config.PING_INTERVAL_S + 3)
+        await clock.sleep(config.PING_INTERVAL_S + 1)  # the first ping is out
+        sent_at = times_of(messages, "ping")[-1]
 
         server.connections[0].push("pong")
+        answered_at = clock.elapsed
         await clock.sleep(1)
         bot.stop()
         await task
 
-        assert bot.stats.rtt_s == [pytest.approx(3, abs=0.01)]
+        assert bot.stats.rtt_s == [pytest.approx(answered_at - sent_at, abs=0.01)]
+
+    async def test_pong_after_a_missed_one_is_timed_from_the_newest_ping(self, server, osrm, clock):
+        # Several pings go unanswered; the pong that finally comes is timed from the
+        # newest one, the only one in flight, not from the first.
+        server.silent.add("ping")
+        messages = record_messages(server, clock)
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(2 * config.PING_INTERVAL_S + 1)
+        pings = times_of(messages, "ping")
+
+        server.connections[0].push("pong")
+        answered_at = clock.elapsed
+        await clock.sleep(1)
+        bot.stop()
+        await task
+
+        assert len(pings) >= 2
+        assert bot.stats.pongs_missed == len(pings) - 1
+        assert bot.stats.rtt_s == [pytest.approx(answered_at - pings[-1], abs=0.01)]
 
     async def test_unexpected_pong_is_ignored(self, server, osrm, clock):
         bot = make_bot(server=server, osrm=osrm, clock=clock)
@@ -896,10 +934,11 @@ class TestBreaks:
         # right after go_offline would get not_online), and still one per interval.
         assert set(kinds[start + 1 : end]) == {"ping"}
         break_pings = [t for t, _ in timeline[start + 1 : end]]
+        # 120 s of break: 6 pings, or 5 when one falls right on its edges.
         expected = round(config.BREAK_DURATION_S[0] / config.PING_INTERVAL_S)
-        assert len(break_pings) == expected
+        assert len(break_pings) in (expected - 1, expected)
         assert gaps(break_pings) == pytest.approx(
-            [config.PING_INTERVAL_S] * (expected - 1), abs=0.01
+            [config.PING_INTERVAL_S] * (len(break_pings) - 1), abs=0.01
         )
         assert bot.stats.breaks == 1
         assert any(t > online_at for t, kind in timeline if kind == "location")
@@ -931,6 +970,22 @@ class TestBreaks:
         await task
 
         assert osrm.routes[routes_before].geometry[0] == parked
+
+    async def test_bot_that_first_connects_on_a_break_is_not_online_yet(
+        self, server, osrm, clock, short_breaks
+    ):
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+        task = asyncio.create_task(bot.run())
+        await clock.sleep(70)  # on the break now
+        bot.stats.went_online = False  # forget the first connection
+
+        server.connections[0].drop(1011)
+        await clock.sleep(10)
+        reconnected_on_break = bot.stats.went_online
+        bot.stop()
+        await task
+
+        assert reconnected_on_break is False
 
     async def test_reconnect_during_a_break_stays_offline(self, server, osrm, clock, short_breaks):
         bot = make_bot(server=server, osrm=osrm, clock=clock)

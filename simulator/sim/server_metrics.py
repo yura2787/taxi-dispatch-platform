@@ -135,13 +135,25 @@ def histogram_quantile(q: float, buckets: Mapping[float, float]) -> float | None
     return lower + (upper - lower) * (rank - below) / (count - below)
 
 
+def _quantile_text(q: float, buckets: Mapping[float, float]) -> str:
+    """Beyond the largest finite bucket the estimate is only that bound: say ">"."""
+    estimate = histogram_quantile(q, buckets)
+    finite = [bound for bound in buckets if not math.isinf(bound)]
+    if estimate is not None and finite:
+        largest = max(finite)
+        # Running maximum, as in histogram_quantile: a torn scrape may dip a bucket.
+        if q * buckets.get(math.inf, 0) > max(buckets[bound] for bound in finite):
+            return f">{ms(largest)}"
+    return ms(estimate)
+
+
 def report(change: Snapshot) -> list[str]:
     """The server part of the summary."""
     # Throttled points are shown on their own line, outside the share.
     total = change.accepted + change.refused
     refused_share = change.refused / total if total else 0.0
     quantiles = " ".join(
-        f"p{round(q * 100)}={ms(histogram_quantile(q, change.buckets))}" for q in (0.5, 0.95, 0.99)
+        f"p{round(q * 100)}={_quantile_text(q, change.buckets)}" for q in (0.5, 0.95, 0.99)
     )
     updates = ", ".join(
         f"{result}={count:.0f}" for result, count in sorted(change.updates.items()) if count

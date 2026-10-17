@@ -1,6 +1,7 @@
 """Percentiles, totals over the bots, the status line and the run summary."""
 
 from collections import Counter
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -96,6 +97,20 @@ class TestTotals:
         assert totals.never_online == 1
         assert totals.stopped == Counter({"closed 4403": 1})
 
+    def test_totals_have_a_place_for_every_counter_of_bot_stats(self):
+        # Otherwise the summary would fail only at the end of a long run.
+        counters = {f.name for f in fields(BotStats) if f.type not in ("bool", bool)}
+
+        assert counters <= {f.name for f in fields(Totals)}
+
+    def test_every_counter_of_bot_stats_is_added_up(self):
+        # Field by field: a counter added to BotStats is summed without more code.
+        bots = [make_bot_view(osrm_failures=2, left_online=1), make_bot_view(osrm_failures=3)]
+
+        totals = Totals.of(bots)
+
+        assert (totals.osrm_failures, totals.left_online) == (5, 1)
+
 
 class TestStatusLine:
     def test_counts_bots_by_state(self):
@@ -159,7 +174,7 @@ class TestSummary:
         assert "event loop lag: p50=5.0ms p99=9.9ms max=10.0ms n=2" in text
         assert "server errors: location_jump=1" in text
         assert "closes by the server: 1006=2" in text
-        assert "breaks: 1, drops: 0, silences: 0" in text
+        assert "breaks: 1, drops: 0, silences: 0, OSRM failures: 0" in text
 
     def test_empty_run_has_no_division_by_zero(self):
         conditions = make_conditions(finished_at=STARTED)

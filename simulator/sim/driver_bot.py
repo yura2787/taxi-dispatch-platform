@@ -112,6 +112,8 @@ class BotStats:
     breaks: int = 0
     drops: int = 0
     silences: int = 0
+    # OSRM calls that failed (start position or route); the car stood meanwhile.
+    osrm_failures: int = 0
     # Stops after which the server may still hold the bot online, until the reaper:
     # go_offline not confirmed in time, or no goodbye connection after a drop.
     left_online: int = 0
@@ -179,6 +181,9 @@ class DriverBot:
         self._rng = rng
         # Ticks of bots are spread over the interval, not all at the same moment.
         self._phase = rng.random() * config.LOCATION_INTERVAL_S
+        # Pings too: sessions start within the ramp-up (10 s), so a ping at start + 20 s
+        # would bunch every bot's pings into half of each 20 s period.
+        self._ping_phase = rng.random() * config.PING_INTERVAL_S
 
         self._car: Car | None = None
         self._drive_task: asyncio.Task[None] | None = None
@@ -321,7 +326,7 @@ class DriverBot:
         *,
         seconds: float,
         event: asyncio.Event | None = None,
-        stopping: asyncio.Task | None = None,
+        stopping: asyncio.Task[bool] | None = None,
     ) -> str:
         """Wait for the event, a stop or the time to pass, whichever comes first:
         "event", "stop" or "timeout". Raises what ended the receiver (a close)."""
@@ -349,7 +354,7 @@ class DriverBot:
         return "timeout"
 
     async def _handshake(
-        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task
+        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task[bool]
     ) -> bool:
         """Auth, then online. False if asked to stop meanwhile."""
         if not await self._authenticate(conn, receiver, stopping):
@@ -365,11 +370,13 @@ class DriverBot:
             raise HandshakeTimeout("not online after go_online")
         if result == "stop":
             return False
-        self.stats.went_online = True
+        # Not on a break: a bot that reconnects mid-break has not been online yet.
+        if self._online.is_set():
+            self.stats.went_online = True
         return True
 
     async def _authenticate(
-        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task | None
+        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task[bool] | None
     ) -> bool:
         """Send auth and wait for the first snapshot. False if asked to stop meanwhile."""
         self._snapshot_received.clear()
@@ -390,7 +397,7 @@ class DriverBot:
         return True
 
     async def _wait_online_unless_on_break(
-        self, receiver: asyncio.Task[None], stopping: asyncio.Task
+        self, receiver: asyncio.Task[None], stopping: asyncio.Task[bool]
     ) -> str:
         if self.on_break:
             # Reconnected during a break: stays offline until the break is over.
@@ -400,12 +407,13 @@ class DriverBot:
         )
 
     async def _serve(
-        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task
+        self, conn: Connection, receiver: asyncio.Task[None], stopping: asyncio.Task[bool]
     ) -> None:
         """Ticks and pings on a fixed schedule until asked to stop."""
         now = self._clock.monotonic()
         next_tick = now + self._phase
-        next_ping = now + config.PING_INTERVAL_S
+        # Within the first interval, so the server's idle timeout is never at risk.
+        next_ping = now + self._ping_phase
         while True:
             wake = min(next_tick, next_ping)
             result = await self._wait(
@@ -550,7 +558,7 @@ class DriverBot:
                 case protocol.UnknownMessage(type=message_type):
                     self.stats.unknown_messages += 1
                     logger.warning(
-                        "driver %d: unknown message type %r", self.driver_id, message_type
+                        "driver %d: unknown or malformed message %r", self.driver_id, message_type
                     )
 
     async def _on_snapshot(self, conn: Connection, snapshot: protocol.StateSnapshot) -> None:
@@ -639,8 +647,14 @@ class DriverBot:
             start = snapshot_position
         else:
             start = random_point_in(config.CITY_AREA, self._rng)
-            with contextlib.suppress(OsrmUnavailable, NoRoute):
+            try:
                 start = await self._osrm.nearest(start)
+            except (OsrmUnavailable, NoRoute) as exc:
+                # Off the road, then: the first route snaps it back.
+                self.stats.osrm_failures += 1
+                # DEBUG: OSRM down at the start would mean a line per bot; the count
+                # is in the summary.
+                logger.debug("driver %d: no road for the start (%s)", self.driver_id, exc)
         self._car = Car(start)
         if not self.on_break:
             self._start_driving()
@@ -659,6 +673,7 @@ class DriverBot:
 
     async def _drive(self) -> None:
         car = self._car
+        assert car is not None  # driving starts only once the car is placed
         try:
             while True:
                 route = await self._next_route()
@@ -677,18 +692,24 @@ class DriverBot:
         """A route from where the car stands. While OSRM is down the car stands (and
         keeps sending points); the retry delay doubles up to OSRM_RETRY_MAX_S."""
         delay = 1.0
+        warned = False
         while True:
             try:
                 return await self._pick_route()
             except (OsrmUnavailable, NoRoute) as exc:
-                logger.warning(
-                    "driver %d: no route (%s), retry in ~%.0fs", self.driver_id, exc, delay
+                self.stats.osrm_failures += 1
+                # Once per outage at WARNING: 1000 bots retrying would drown the log.
+                level = logging.DEBUG if warned else logging.WARNING
+                warned = True
+                logger.log(
+                    level, "driver %d: no route (%s), retry in ~%.0fs", self.driver_id, exc, delay
                 )
             # "Equal jitter": between half and the whole delay.
             await self._clock.sleep(delay / 2 + self._rng.uniform(0, delay / 2))
             delay = min(delay * 2, config.OSRM_RETRY_MAX_S)
 
     async def _pick_route(self) -> Route:
+        assert self._car is not None
         origin, _, _ = self._car.where(self._clock.monotonic())
         last: Route | None = None
         for _ in range(config.ROUTE_ATTEMPTS):

@@ -15,6 +15,7 @@ import logging
 import math
 import signal
 import sys
+from collections.abc import Callable
 
 import httpx
 
@@ -29,10 +30,12 @@ logger = logging.getLogger("sim")
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
-def _number(kind: type, *, low: float, low_inclusive: bool = True, high: float | None = None):
+def _number(
+    kind: type, *, low: float, low_inclusive: bool = True, high: float | None = None
+) -> Callable[[str], float]:
     """An argparse type: a number within limits, with a readable error otherwise."""
 
-    def parse(value: str):
+    def parse(value: str) -> float:
         try:
             number = kind(value)
         except ValueError:
@@ -91,6 +94,7 @@ async def simulate(options: runner.RunOptions) -> int:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
+    assert main_task is not None  # always: simulate() runs as a task
 
     def on_signal() -> None:
         if stop.is_set():

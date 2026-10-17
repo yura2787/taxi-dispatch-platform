@@ -87,15 +87,26 @@ class TestServerMessages:
 
         assert message == UnknownMessage(type="offer")
 
-    @pytest.mark.parametrize(
-        "raw",
-        ["not json", "[]", '{"type": "pong"}', '{"type": "error", "data": {}}'],
-        ids=["not_json", "not_an_object", "no_data", "error_without_code"],
-    )
-    def test_broken_message_does_not_fail(self, raw):
+    @pytest.mark.parametrize("raw", ["not json", "[]", '{"data": {}}'])
+    def test_message_without_a_type_does_not_fail(self, raw):
         message = protocol.parse_server_message(raw)
 
         assert message == UnknownMessage(type=None)
+
+    @pytest.mark.parametrize(
+        ("raw", "message_type"),
+        [
+            ('{"type": "pong"}', "pong"),
+            ('{"type": "error", "data": {}}', "error"),
+            ('{"type": "state_snapshot", "data": {"status": "available"}}', "state_snapshot"),
+        ],
+        ids=["no_data", "error_without_code", "snapshot_without_position"],
+    )
+    def test_known_type_with_broken_data_keeps_its_type(self, raw, message_type):
+        # What drifted shows in the log, not just "unknown message type None".
+        message = protocol.parse_server_message(raw)
+
+        assert message == UnknownMessage(type=message_type)
 
 
 class TestCloseVerdicts:

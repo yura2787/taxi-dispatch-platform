@@ -10,10 +10,10 @@ samples are kept for the whole run, so a run of many hours grows them without bo
 import os
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 
-from sim.driver_bot import BotStats, DriverBot
+from sim.driver_bot import AVAILABLE, BotStats, DriverBot
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
@@ -50,6 +50,7 @@ class Totals:
     drops: int = 0
     silences: int = 0
     left_online: int = 0
+    osrm_failures: int = 0
     rtt_s: list[float] = field(default_factory=list)
     never_online: int = 0
     stopped: Counter[str] = field(default_factory=Counter)
@@ -64,19 +65,19 @@ class Totals:
         return totals
 
     def _add(self, stats: BotStats) -> None:
-        self.locations_sent += stats.locations_sent
-        self.errors.update(stats.errors)
-        self.closes.update(stats.closes)
-        self.connect_failures += stats.connect_failures
-        self.handshake_timeouts += stats.handshake_timeouts
-        self.reconnects += stats.reconnects
-        self.unknown_messages += stats.unknown_messages
-        self.pongs_missed += stats.pongs_missed
-        self.breaks += stats.breaks
-        self.drops += stats.drops
-        self.silences += stats.silences
-        self.left_online += stats.left_online
-        self.rtt_s.extend(stats.rtt_s)
+        # Field by field, so a new counter in BotStats needs only its line here
+        # in Totals; the flags are summed up into never_online below.
+        for item in fields(BotStats):
+            value = getattr(stats, item.name)
+            if isinstance(value, bool):
+                continue
+            total = getattr(self, item.name)
+            if isinstance(value, Counter):
+                total.update(value)
+            elif isinstance(value, list):
+                total.extend(value)
+            else:
+                setattr(self, item.name, total + value)
         self.never_online += stats.started and not stats.went_online
 
 
@@ -93,7 +94,7 @@ class StatusLine:
         if self._at is not None and now > self._at:
             rate = (totals.locations_sent - self._sent) / (now - self._at)
         self._sent, self._at = totals.locations_sent, now
-        online = sum(bot.connected and bot.status == "available" for bot in bots)
+        online = sum(bot.connected and bot.status == AVAILABLE for bot in bots)
         return (
             f"bots={len(bots)} connected={sum(bot.connected for bot in bots)} online={online} "
             f"on_break={sum(bot.on_break for bot in bots)} stopped={sum(totals.stopped.values())} "
@@ -160,7 +161,8 @@ def summary(
         f"reconnects: {totals.reconnects}, failed connects: {totals.connect_failures}, "
         f"handshake timeouts: {totals.handshake_timeouts}, "
         f"unknown messages: {totals.unknown_messages}",
-        f"breaks: {totals.breaks}, drops: {totals.drops}, silences: {totals.silences}",
+        f"breaks: {totals.breaks}, drops: {totals.drops}, silences: {totals.silences}, "
+        f"OSRM failures: {totals.osrm_failures}",
         f"never online: {totals.never_online}, stopped bots: {_counts(totals.stopped)}, "
         f"cancelled at the stop: {cancelled}, left online at the stop: {totals.left_online}",
     ]

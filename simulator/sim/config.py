@@ -20,7 +20,8 @@ REALTIME_METRICS_URL = os.environ.get("REALTIME_METRICS_URL", "http://realtime:8
 
 
 # --- Areas ---
-# Keep in sync with realtime/app/config.py. Routes that leave it are not used.
+# Keep in sync with realtime/app/config.py. Routes that leave it are avoided: one is
+# used only when ROUTE_ATTEMPTS destinations all gave such a route.
 SERVICE_AREA = BoundingBox(min_lat=48.22, min_lon=25.80, max_lat=48.36, max_lon=26.08)
 
 # Where route destinations are picked: the city with Mahala in the east and the

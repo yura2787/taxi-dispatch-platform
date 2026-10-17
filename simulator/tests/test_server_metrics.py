@@ -195,6 +195,16 @@ class TestReport:
         )
         assert lines[4] == "closes of drivers by the server: 4409=1"
 
+    def test_quantile_beyond_the_largest_bucket_says_so(self):
+        # 2 of 100 points took longer than the largest bucket (1 s): p99 is not 1 s.
+        change = Snapshot(updates={"accepted": 100}, buckets={0.5: 90, 1.0: 98, INF: 100})
+
+        lines = report(change)
+
+        assert lines[3] == (
+            "location_processing_seconds (bucket estimate): p50=277.8ms p95=812.5ms p99=>1000.0ms"
+        )
+
     def test_run_without_points(self):
         lines = report(Snapshot())
 

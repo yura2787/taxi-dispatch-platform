@@ -10,9 +10,10 @@ cancelled, and the summary is built.
 import asyncio
 import logging
 import random
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sim import config, protocol, server_metrics
 from sim.clock import Clock
@@ -290,7 +291,7 @@ async def _until_done(stop: asyncio.Event, clock: Clock, duration_s: float | Non
         await _first(clock.sleep(duration_s), stop.wait())
 
 
-async def _first(*coroutines) -> None:
+async def _first(*coroutines: Coroutine[Any, Any, object]) -> None:
     """Wait until any of the coroutines finishes; cancel the rest."""
     tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
     try:
@@ -301,7 +302,7 @@ async def _first(*coroutines) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _wait_or_cancel(tasks: list[asyncio.Task], clock: Clock, seconds: float) -> int:
+async def _wait_or_cancel(tasks: list[asyncio.Task[None]], clock: Clock, seconds: float) -> int:
     """Give the bots `seconds` to go offline and close; cancel the ones that did not.
     Returns how many were cancelled."""
     pending = {task for task in tasks if not task.done()}
@@ -326,14 +327,14 @@ async def _wait_or_cancel(tasks: list[asyncio.Task], clock: Clock, seconds: floa
     return len(late)
 
 
-def _crash_of(task: asyncio.Task) -> BaseException | None:
+def _crash_of(task: asyncio.Task[None]) -> BaseException | None:
     """What a finished helper task died of; None if it was only cancelled."""
     if not task.done() or task.cancelled():
         return None
     return task.exception()
 
 
-def _log_crash(task: asyncio.Task) -> None:
+def _log_crash(task: asyncio.Task[None]) -> None:
     """At once, not only in the summary: the status lines would stop without a word."""
     crash = _crash_of(task)
     if crash is not None:

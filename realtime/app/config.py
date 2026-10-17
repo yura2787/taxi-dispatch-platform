@@ -51,7 +51,7 @@ WS_AUTH_TIMEOUT_S = 5
 WS_IDLE_TIMEOUT_S = 45
 
 # Any real message is well under 1 KB (a JWT included). Keep in sync with
-# --ws-max-size in docker-compose.yml and the Dockerfile.
+# --ws-max-size in docker-compose.yml, docker-compose.loadtest.yml and the Dockerfile.
 WS_MAX_MESSAGE_BYTES = 4096
 
 # Token bucket per connection, for every message: a phone needs ~0.5/s (a point every
