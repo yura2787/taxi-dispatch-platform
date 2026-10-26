@@ -7,7 +7,8 @@ memory depends only on the range of the values (about 116 buckets per tenfold), 
 recorders of many bots merge into one.
 
 The price is precision: a percentile is taken from the middle of its bucket, within
-PRECISION of the exact value from SMALLEST_S up. Count and max stay exact.
+PRECISION of the exact value from SMALLEST_S up, and never above the max. Count and max
+stay exact.
 """
 
 import math
@@ -19,7 +20,7 @@ RATIO = 1.02
 PRECISION = math.sqrt(RATIO) - 1  # 0.995 %
 
 # The lower edge of the first bucket: smaller (positive) values count as about it.
-# A quiet event loop is late by a few hundred nanoseconds, so far below that.
+# Far below anything measured here: even a quiet event loop is late by hundreds of ns.
 SMALLEST_S = 1e-9
 
 _LOG_RATIO = math.log(RATIO)
@@ -53,7 +54,9 @@ class LatencyRecorder:
             self.max = seconds
 
     def merge(self, other: "LatencyRecorder") -> None:
-        """Add the samples of another recorder (e.g. of another bot) to this one."""
+        """Add the samples of another recorder (e.g. of another bot) to this one.
+        Not an interval from minus(): its max is unknown, so the merged max (and the
+        cap of the percentiles) would be too low."""
         self._buckets.update(other._buckets)
         self._zeros += other._zeros
         self.count += other.count
@@ -94,7 +97,10 @@ class LatencyRecorder:
         lower = int(position)
         upper = min(lower + 1, self.count - 1)
         low, high = self._values_at(lower, upper)
-        return low + (high - low) * (position - lower)
+        estimate = low + (high - low) * (position - lower)
+        # A bucket's middle may lie above the samples in it; no percentile can be
+        # above the exact max (unknown for an interval, see minus()).
+        return estimate if self.max is None else min(estimate, self.max)
 
     def _values_at(self, lower: int, upper: int) -> tuple[float, float]:
         """The estimates of the lower-th and upper-th smallest samples (0-based,

@@ -75,6 +75,38 @@ class TestPercentiles:
         assert recorder.percentile(1) == recorder.percentile(99)
         assert recorder.percentile(99) == pytest.approx(0.003, rel=PRECISION)
 
+    @pytest.mark.parametrize("k", [100, 1000, 2000])
+    def test_no_percentile_exceeds_the_exact_max(self, k):
+        # A sample right on a bucket's lower edge sits below the bucket's middle: the
+        # report must not say "p99=10.4ms max=10.2ms".
+        on_the_edge = SMALLEST_S * RATIO**k
+        recorder = recorded([on_the_edge / 2, on_the_edge])
+
+        percentiles = [recorder.percentile(q) for q in (50, 99, 100)]
+
+        assert all(p <= recorder.max for p in percentiles)
+        assert recorder.percentile(100) == recorder.max
+
+    def test_max_above_its_bucket_middle_stays_within_the_precision(self):
+        # Just below the next bucket edge: the middle is lower than the sample.
+        near_the_top = SMALLEST_S * RATIO**1001 * 0.999
+        recorder = recorded([near_the_top])
+
+        top = recorder.percentile(100)
+
+        assert top <= recorder.max
+        assert top == pytest.approx(recorder.max, rel=PRECISION)
+
+    def test_percentiles_of_an_interval_are_not_capped(self):
+        # minus() gives no max: nothing to cap at, the bucket estimate stands.
+        earlier = recorded([0.001])
+        later = recorded([0.001, 0.010])
+
+        interval = later.minus(earlier)
+
+        assert interval.max is None
+        assert interval.percentile(100) == pytest.approx(0.010, rel=PRECISION)
+
     def test_zero_is_kept_exactly(self):
         # The loop lag probe is often right on time.
         assert recorded([0.0, 0.0, 0.0]).percentile(99) == 0.0
@@ -136,7 +168,11 @@ class TestCombining:
         interval = recorder.minus(earlier)
 
         alone = recorded(during)
-        assert [interval.percentile(q) for q in QS] == [alone.percentile(q) for q in QS]
+        # The same buckets; only the interval knows no max to cap its percentiles at,
+        # so it is never lower, and equal once capped.
+        assert all(interval.percentile(q) >= alone.percentile(q) for q in QS)
+        capped = [min(interval.percentile(q), alone.max) for q in QS]
+        assert capped == [alone.percentile(q) for q in QS]
         assert interval.count == len(during)
 
     @pytest.mark.parametrize(

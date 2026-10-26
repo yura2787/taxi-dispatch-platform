@@ -699,11 +699,14 @@ class DriverBot:
             start = random_point_in(config.CITY_AREA, self._rng)
             try:
                 start = await self._osrm.nearest(start)
-            except (OsrmUnavailable, NoRoute) as exc:
-                # Off the road, then: the first route snaps it back.
+            except NoRoute as exc:
+                # A healthy OSRM with no road near this random point: not a failure.
+                # Off the road, then; the first route snaps the car back.
+                logger.debug("driver %d: no road near the start (%s)", self.driver_id, exc)
+            except OsrmUnavailable as exc:
                 self.stats.osrm_failures += 1
                 # DEBUG: OSRM down at the start would mean a line per bot; the count
-                # is in the summary.
+                # is in the summary (and fails --strict).
                 logger.debug("driver %d: no road for the start (%s)", self.driver_id, exc)
         self._car = Car(start)
         if not self.on_break:

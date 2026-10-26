@@ -381,6 +381,45 @@ class TestOsrmUnavailable:
         assert len(retries) > len(warnings) == 1
         assert any("no road for the start" in r.getMessage() for r in caplog.records)
 
+    async def test_start_away_from_any_road_is_not_an_osrm_failure(
+        self, server, osrm, clock, monkeypatch
+    ):
+        # A healthy OSRM answers NoSegment for a random point with no road nearby;
+        # only an OSRM that does not answer is a failure (--strict fails on those).
+        nearest = osrm.nearest
+        calls = []
+
+        async def no_road_for_the_first_point(point):
+            calls.append(point)
+            if len(calls) == 1:
+                raise NoRoute("NoSegment")
+            return await nearest(point)
+
+        monkeypatch.setattr(osrm, "nearest", no_road_for_the_first_point)
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+
+        await run(bot, clock, 10)
+
+        assert len(calls) >= 2  # the start point was asked for, then routes
+        assert bot.stats.osrm_failures == 0
+
+    async def test_osrm_down_at_the_start_is_a_failure(self, server, osrm, clock, monkeypatch):
+        nearest = osrm.nearest
+        calls = []
+
+        async def down_for_the_first_point(point):
+            calls.append(point)
+            if len(calls) == 1:
+                raise OsrmUnavailable("timeout")
+            return await nearest(point)
+
+        monkeypatch.setattr(osrm, "nearest", down_for_the_first_point)
+        bot = make_bot(server=server, osrm=osrm, clock=clock)
+
+        await run(bot, clock, 10)
+
+        assert bot.stats.osrm_failures == 1
+
     async def test_drives_once_osrm_is_back(self, server, osrm, clock):
         osrm.failure = OsrmUnavailable("down")
         bot = make_bot(server=server, osrm=osrm, clock=clock)
