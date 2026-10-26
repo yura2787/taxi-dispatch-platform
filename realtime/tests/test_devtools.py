@@ -1,5 +1,5 @@
-"""Developer command `seed-drivers`: what the profiles look like, idempotency and
-the DEV_AUTH guard."""
+"""Developer command `seed-drivers`: what the profiles look like, idempotency, the
+range of seeded ids and the DEV_AUTH guard."""
 
 import asyncio
 import re
@@ -66,6 +66,22 @@ class TestSeedDrivers:
 
         assert await redis.ttl(redis_keys.driver_profile(1)) == -1
 
+    async def test_first_id_shifts_the_range_of_seeded_drivers(self, redis):
+        await seed_drivers(redis, 3, first_id=50)
+
+        assert sorted(await profile_keys(redis)) == [
+            redis_keys.driver_profile(driver_id).encode() for driver_id in (50, 51, 52)
+        ]
+
+    async def test_profile_does_not_depend_on_first_id(self, redis):
+        await seed_drivers(redis, 3, first_id=50)
+        seeded_from_50 = await redis.hgetall(redis_keys.driver_profile(51))
+        await redis.flushdb()
+
+        await seed_drivers(redis, 60)
+
+        assert await redis.hgetall(redis_keys.driver_profile(51)) == seeded_from_50
+
 
 class TestMain:
     # main() runs its own event loop, so it is called from a worker thread.
@@ -75,7 +91,16 @@ class TestMain:
 
         assert code == 0
         assert len(await profile_keys(redis)) == 3
-        assert "Seeded 3 driver profiles." in capsys.readouterr().out
+        assert "Seeded 3 driver profiles (ids 1..3)." in capsys.readouterr().out
+
+    async def test_seeds_from_the_given_first_id(self, redis, dev_auth, capsys):
+        code = await asyncio.to_thread(main, ["seed-drivers", "--first-id", "50", "--count", "3"])
+
+        assert code == 0
+        assert sorted(await profile_keys(redis)) == [
+            redis_keys.driver_profile(driver_id).encode() for driver_id in (50, 51, 52)
+        ]
+        assert "Seeded 3 driver profiles (ids 50..52)." in capsys.readouterr().out
 
     async def test_refuses_without_dev_auth(self, redis, monkeypatch, capsys):
         monkeypatch.setattr(config, "DEV_AUTH", False)
@@ -93,6 +118,14 @@ class TestMain:
 
         assert exc_info.value.code == 2
         assert "--count" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("first_id", ["0", "-1", "one"])
+    def test_rejects_a_first_id_that_is_not_a_positive_number(self, first_id, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            main(["seed-drivers", "--first-id", first_id])
+
+        assert exc_info.value.code == 2
+        assert "--first-id" in capsys.readouterr().err
 
     def test_requires_a_command(self, capsys):
         with pytest.raises(SystemExit):
