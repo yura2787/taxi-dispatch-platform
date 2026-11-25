@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -24,16 +25,22 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.redis = create_redis()
-    app.state.osrm = OsrmClient(httpx.AsyncClient(base_url=config.OSRM_URL))
-    app.state.drivers = DriverStore(app.state.redis)
-    app.state.driver_connections = ConnectionRegistry()
-    app.state.clock = Clock()
-    warn_if_dev_auth()
-    yield
-    await app.state.osrm.aclose()
-    await app.state.redis.aclose()
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Every client is closed on the way out, also when the app stops with an exception
+    # or startup fails halfway: only what was created, in reverse order, and a close
+    # that fails does not skip the ones after it.
+    async with AsyncExitStack() as cleanup:
+        app.state.redis = create_redis()
+        cleanup.push_async_callback(app.state.redis.aclose)
+        # The HTTP client is what holds connections: it is closed even if wrapping it fails.
+        osrm_http = httpx.AsyncClient(base_url=config.OSRM_URL)
+        cleanup.push_async_callback(osrm_http.aclose)
+        app.state.osrm = OsrmClient(osrm_http)
+        app.state.drivers = DriverStore(app.state.redis)
+        app.state.driver_connections = ConnectionRegistry()
+        app.state.clock = Clock()
+        warn_if_dev_auth()
+        yield
 
 
 app = FastAPI(title="RideFlow realtime", lifespan=lifespan)
