@@ -20,15 +20,13 @@ from typing import NoReturn
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from redis.exceptions import RedisError
-from starlette.websockets import WebSocketState
 
 from app import config
-from app.auth import AuthError, Role, get_authenticator
+from app.auth import Role
 from app.clock import Clock
 from app.metrics import (
     LOCATION_PROCESSING,
     LOCATION_UPDATES,
-    WS_CLOSES,
     WS_CONNECTIONS,
     LocationResult,
 )
@@ -49,20 +47,13 @@ from app.schemas.ws import (
 )
 from app.services.drivers import DriverProfile, DriverStore, LocationUpdate, Outcome
 from app.services.locations import Location, LocationFilter, Verdict
+from app.ws.common import WsClose, authenticate, close_socket, receive_raw
 from app.ws.limits import RateVerdict, TokenBucket
 from app.ws.manager import Connection, ConnectionRegistry
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# Close codes worth a WARNING: a client or the server is misbehaving.
-_WARN_ON_CLOSE = {
-    CloseCode.INVALID_TOKEN,
-    CloseCode.FORBIDDEN,
-    CloseCode.POLICY_VIOLATION,
-    CloseCode.INTERNAL_ERROR,
-}
 
 _REJECTIONS = {
     Verdict.OUT_OF_ORDER: (LocationResult.REJECTED_OUT_OF_ORDER, ErrorCode.LOCATION_OUT_OF_ORDER),
@@ -87,15 +78,6 @@ async def driver_websocket(websocket: WebSocket) -> None:
     state = websocket.app.state
     session = DriverSession(websocket, state.drivers, state.driver_connections, state.clock)
     await session.run()
-
-
-class _Close(Exception):
-    """Close the connection with this code."""
-
-    def __init__(self, code: CloseCode, reason: str):
-        super().__init__(reason)
-        self.code = code
-        self.reason = reason
 
 
 class DriverSession:
@@ -125,7 +107,7 @@ class DriverSession:
         try:
             await self._handshake()
             await self._serve()
-        except _Close as close:
+        except WsClose as close:
             await self._close(close.code, close.reason)
         except WebSocketDisconnect:
             pass  # the client left; nothing to tell it
@@ -140,31 +122,14 @@ class DriverSession:
     # ------------------------------------------------------------------
 
     async def _handshake(self) -> None:
-        try:
-            async with asyncio.timeout(config.WS_AUTH_TIMEOUT_S):
-                raw = await self._receive()
-        except TimeoutError:
-            raise _Close(CloseCode.AUTH_TIMEOUT, "no auth message in time") from None
-        # The first message is the first token of the bucket; it is always there.
-        self._rate.take()
-
-        try:
-            message = parse_message(raw)
-        except InvalidMessage as exc:
-            raise _Close(CloseCode.INVALID_TOKEN, f"invalid auth message: {exc.message}") from None
-        if not isinstance(message, AuthMessage):
-            raise _Close(CloseCode.INVALID_TOKEN, "the first message must be auth")
-        try:
-            principal = get_authenticator().authenticate(message.data.token)
-        except AuthError as exc:
-            raise _Close(CloseCode.INVALID_TOKEN, str(exc)) from None
-        if principal.role is not Role.DRIVER:
-            raise _Close(CloseCode.FORBIDDEN, f"role {principal.role} may not connect as a driver")
+        principal = await authenticate(
+            self._websocket, self._rate, role=Role.DRIVER, parse=parse_message
+        )
 
         driver_id = principal.user_id
         profile = await self._store.get_profile(driver_id)
         if profile is None or not profile.may_go_online:
-            raise _Close(CloseCode.FORBIDDEN, f"driver {driver_id} may not work")
+            raise WsClose(CloseCode.FORBIDDEN, f"driver {driver_id} may not work")
 
         # Redis first, then the registry: the old connection's cleanup must already
         # see a foreign conn_id, or it would take the driver out of the GEO sets.
@@ -197,7 +162,7 @@ class DriverSession:
                 elif verdict is RateVerdict.WARN:
                     await self._error(ErrorCode.RATE_LIMITED)
                 elif verdict is RateVerdict.CLOSE:
-                    raise _Close(CloseCode.POLICY_VIOLATION, "too many messages")
+                    raise WsClose(CloseCode.POLICY_VIOLATION, "too many messages")
         finally:
             superseded.cancel()
 
@@ -215,8 +180,8 @@ class DriverSession:
             return receive.result()
         receive.cancel()
         if superseded in done:
-            raise _Close(CloseCode.SUPERSEDED, "a newer connection of this driver opened")
-        raise _Close(CloseCode.IDLE, "no messages for too long")
+            raise WsClose(CloseCode.SUPERSEDED, "a newer connection of this driver opened")
+        raise WsClose(CloseCode.IDLE, "no messages for too long")
 
     async def _handle(self, raw: str | bytes) -> None:
         try:
@@ -309,25 +274,14 @@ class DriverSession:
         # The only outcome left once a caller has handled the others.
         assert outcome is Outcome.STALE_CONNECTION, f"unexpected script outcome {outcome}"
         # Another connection (e.g. on another gateway instance) owns the driver now.
-        raise _Close(CloseCode.SUPERSEDED, "the driver is connected elsewhere")
+        raise WsClose(CloseCode.SUPERSEDED, "the driver is connected elsewhere")
 
     # ------------------------------------------------------------------
     # I/O
     # ------------------------------------------------------------------
 
     async def _receive(self) -> str | bytes:
-        message = await self._websocket.receive()
-        if message["type"] == "websocket.disconnect":
-            raise WebSocketDisconnect(message.get("code", 1000), message.get("reason"))
-        raw = message.get("text")
-        if raw is None:
-            raw = message.get("bytes") or b""
-        # uvicorn's --ws-max-size refuses such frames first; this check keeps the
-        # limit when the app runs without it (tests, another server).
-        size = len(raw.encode()) if isinstance(raw, str) else len(raw)
-        if size > config.WS_MAX_MESSAGE_BYTES:
-            raise _Close(CloseCode.MESSAGE_TOO_BIG, f"message of {size} bytes")
-        return raw
+        return await receive_raw(self._websocket)
 
     async def _send(self, message: BaseModel) -> None:
         await self._websocket.send_text(message.model_dump_json())
@@ -340,19 +294,14 @@ class DriverSession:
         await self._send(ErrorMessage.build(code, _ERROR_TEXT[code]))
 
     async def _close(self, code: CloseCode, reason: str) -> None:
-        WS_CLOSES.labels(self._role, int(code)).inc()
-        log = logger.warning if code in _WARN_ON_CLOSE else logger.info
-        log(
-            "Closing driver WebSocket with %d (driver %s): %s", code, self._driver_id or "?", reason
+        await close_socket(
+            self._websocket,
+            code,
+            reason,
+            role=self._role,
+            endpoint="driver",
+            who=f"driver {self._driver_id or '?'}",
         )
-        if (
-            self._websocket.application_state is WebSocketState.CONNECTED
-            and self._websocket.client_state is WebSocketState.CONNECTED
-        ):
-            try:
-                await self._websocket.close(code, reason)
-            except WebSocketDisconnect:
-                pass  # the client left at the same moment
 
     async def _cleanup(self) -> None:
         if self._connection is None:

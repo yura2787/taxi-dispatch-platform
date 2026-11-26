@@ -1,8 +1,11 @@
-"""WebSocket messages of the driver endpoint, in both directions.
+"""WebSocket messages of the driver endpoint, in both directions, and what every
+endpoint shares: auth, ping/pong, errors, close codes and the envelope parser.
 
 Every message is an envelope {"type": "...", "data": {...}}. Incoming messages are a
 discriminated union on "type", parsed straight from the raw text in one step, so a
-broken JSON, an unknown type and invalid data each get their own error code.
+broken JSON, an unknown type and invalid data each get their own error code. Each
+endpoint has its own union and parses it with parse_with(), so the codes are the
+same everywhere.
 
 Incoming models are strict: no type coercion (ts 1.0 or "123" is not an int), no
 NaN or Infinity, no unknown fields. A phone sends these several times a second;
@@ -107,6 +110,9 @@ class CloseCode(IntEnum):
     POLICY_VIOLATION = 1008
     MESSAGE_TOO_BIG = 1009
     INTERNAL_ERROR = 1011
+    # Overloaded for now: the client reconnects with backoff (too many connections,
+    # or it does not keep up with what the server sends).
+    TRY_AGAIN_LATER = 1013
 
 
 class InvalidMessage(Exception):
@@ -118,12 +124,18 @@ class InvalidMessage(Exception):
         self.message_type = message_type
 
 
-def parse_message(raw: str | bytes) -> IncomingMessage:
-    """Parse one incoming message or raise InvalidMessage with the error code."""
+def parse_with[T](adapter: TypeAdapter[T], raw: str | bytes) -> T:
+    """Parse one incoming message with an endpoint's union, or raise InvalidMessage
+    with the error code."""
     try:
-        return _INCOMING.validate_json(raw)
+        return adapter.validate_json(raw)
     except ValidationError as exc:
         raise _invalid(exc) from None
+
+
+def parse_message(raw: str | bytes) -> IncomingMessage:
+    """Parse one incoming message of the driver endpoint."""
+    return parse_with(_INCOMING, raw)
 
 
 def _invalid(exc: ValidationError) -> InvalidMessage:
