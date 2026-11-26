@@ -58,3 +58,13 @@ LOCATION_PROCESSING = Histogram(
     "Time from a parsed location to the answer of its Lua script.",
     buckets=(0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
 )
+
+# --- Dispatcher map ---
+# Snapshots for the map pages of admins, built by the gateway (not by the dispatcher
+# process, whose metrics live in dispatcher_metrics.py).
+
+DISPATCHER_SNAPSHOT_SKIPPED = Counter(
+    "dispatcher_snapshot_skipped_total",
+    "Dispatcher map snapshots dropped for a page because a newer one came before the "
+    "page took it, once per page and snapshot; a rising rate means slow pages.",
+)
