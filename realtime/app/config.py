@@ -128,6 +128,15 @@ DISPATCHER_METRICS_PORT = 8002
 # drivers take two round trips, and no single reply grows with the city.
 SNAPSHOT_READ_BATCH = 500
 
+# A full snapshot of the city goes to every map page this often (spec 12.7): smooth
+# enough for cars that move a few metres a second, and the page interpolates between.
+DISPATCHER_SNAPSHOT_INTERVAL_S = 2
+
+# On shutdown, the snapshot loop gets this long to finish its tick, then it is
+# cancelled: enough for a Redis read that hits REDIS_SOCKET_TIMEOUT_S once; a tick
+# stuck longer (several slow batches) is cut short, which is what the cancel is for.
+DISPATCHER_STOP_TIMEOUT_S = 5
+
 # Map pages (WebSocket connections of admins) per gateway process. A handful of
 # dispatchers with a few tabs each fit easily; more is a leak or abuse, and every page
 # costs a ~100 KB send per snapshot. Above it a new page is closed with 1013.

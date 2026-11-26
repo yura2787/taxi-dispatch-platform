@@ -19,7 +19,8 @@ takes the ready one instead of building it; the slots and sessions stay as they 
 
 import asyncio
 import logging
-from typing import Protocol
+from collections.abc import Coroutine
+from typing import Any, Protocol
 
 from app import config
 from app.clock import Clock
@@ -87,6 +88,9 @@ class SnapshotBroadcaster:
         self._latest: str | None = None
         # When the current run of failures was last logged; None while healthy.
         self._failure_logged_at: float | None = None
+        # Set while a page waits for its first snapshot (none was built yet, or the
+        # last page left and it was dropped): wakes the loop for a tick at once.
+        self._page_waits = asyncio.Event()
 
     @property
     def subscribers(self) -> int:
@@ -102,6 +106,10 @@ class SnapshotBroadcaster:
         slot = SnapshotSlot()
         if self._latest is not None:
             slot.put(self._latest)
+        else:
+            # Nothing to give yet: the loop builds a snapshot at once, not at its next
+            # tick (a reloaded page would otherwise wait up to an interval).
+            self._page_waits.set()
         self._slots.add(slot)
         return slot
 
@@ -112,6 +120,38 @@ class SnapshotBroadcaster:
             # Nobody watches, so no ticks until somebody does: the next first page
             # must get a fresh snapshot, not one from whenever the last page left.
             self._latest = None
+            self._page_waits.clear()
+
+    async def run(self, stop: asyncio.Event) -> None:
+        """Tick every DISPATCHER_SNAPSHOT_INTERVAL_S while pages watch, until `stop`.
+
+        Without pages there are no ticks and no Redis reads: the loop sleeps until a
+        page comes. A page that finds no snapshot to take wakes the loop for a tick at
+        once, and the schedule restarts from it. Ticks keep a fixed schedule; ticks
+        missed (a slow Redis, a busy event loop) are skipped, not caught up in a burst.
+        `stop` ends the loop after the current tick.
+        """
+        loop = asyncio.get_running_loop()
+        scheduled: float | None = None
+        while not stop.is_set():
+            if self._slots and (scheduled is None or loop.time() >= scheduled):
+                started = loop.time()
+                await self.tick()
+                # Every page that was waiting is in a slot now, the snapshot with it.
+                self._page_waits.clear()
+                interval = config.DISPATCHER_SNAPSHOT_INTERVAL_S
+                previous = started if scheduled is None else scheduled
+                scheduled = next_tick_at(previous, loop.time(), interval)
+            elif not self._slots:
+                scheduled = None  # nothing to keep a schedule for
+            try:
+                # No pages: no deadline, only a page or `stop` wakes the loop.
+                async with asyncio.timeout_at(scheduled):
+                    await _first_of(stop.wait(), self._page_waits.wait())
+            except TimeoutError:
+                pass
+            if self._page_waits.is_set():
+                scheduled = None  # tick now
 
     async def tick(self) -> bool:
         """Build one snapshot and put it into every slot. False if it failed.
@@ -154,3 +194,27 @@ class SnapshotBroadcaster:
         if self._failure_logged_at is not None:
             self._failure_logged_at = None
             logger.info("Dispatcher snapshots recovered")
+
+
+def next_tick_at(scheduled: float, now: float, interval: float) -> float:
+    """The next tick on the fixed schedule after `scheduled`, never in the past.
+
+    A tick that ran late does not shift the schedule; ticks whose time has already
+    passed are skipped, so a stall is followed by one tick, not a burst.
+    """
+    upcoming = scheduled + interval
+    if upcoming < now:
+        missed = (now - upcoming) // interval + 1
+        upcoming += missed * interval
+    return upcoming
+
+
+async def _first_of(*waits: Coroutine[Any, Any, Any]) -> None:
+    """Wait until any of the coroutines finishes; the others are cancelled."""
+    tasks = [asyncio.ensure_future(wait) for wait in waits]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

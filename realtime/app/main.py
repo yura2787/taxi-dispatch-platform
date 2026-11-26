@@ -15,11 +15,13 @@ from app.clock import Clock
 from app.redis_client import create_redis
 from app.services.drivers import DriverStore
 from app.services.osrm import CITY_CENTRE, NoRoute, OsrmClient, OsrmUnavailable
+from app.ws.broadcaster import SnapshotBroadcaster
 from app.ws.driver import router as driver_ws_router
 from app.ws.manager import ConnectionRegistry
 
 # Uvicorn configures only its own loggers; without this, INFO from app modules is lost.
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 # httpx logs every request at INFO; OSRM calls are counted in metrics instead.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -39,8 +41,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.drivers = DriverStore(app.state.redis)
         app.state.driver_connections = ConnectionRegistry()
         app.state.clock = Clock()
+        app.state.snapshots = SnapshotBroadcaster(app.state.drivers, app.state.clock)
+        # Registered after the clients, so it stops before they close (reverse order):
+        # a tick never runs against a closed Redis.
+        stop_snapshots = asyncio.Event()
+        snapshot_loop = asyncio.create_task(
+            app.state.snapshots.run(stop_snapshots), name="dispatcher snapshots"
+        )
+        snapshot_loop.add_done_callback(_log_crash)
+        cleanup.push_async_callback(_stop_task, snapshot_loop, stop_snapshots)
         warn_if_dev_auth()
         yield
+
+
+def _log_crash(task: asyncio.Task) -> None:
+    """A background loop that died must not go unnoticed: its pages would just freeze."""
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        logger.error("Background task %s crashed", task.get_name(), exc_info=exc)
+
+
+async def _stop_task(task: asyncio.Task, stop: asyncio.Event) -> None:
+    """Ask a background loop to stop, wait DISPATCHER_STOP_TIMEOUT_S, then cancel it.
+
+    A loop that crashed earlier was already logged by _log_crash; its error is not
+    raised again here, so the rest of the shutdown goes on.
+    """
+    stop.set()
+    try:
+        done, _ = await asyncio.wait({task}, timeout=config.DISPATCHER_STOP_TIMEOUT_S)
+    except asyncio.CancelledError:
+        # The shutdown itself was cancelled: the loop must not outlive the clients.
+        task.cancel()
+        raise
+    if task not in done:
+        logger.warning("Background task %s did not stop in time; cancelling it", task.get_name())
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 app = FastAPI(title="RideFlow realtime", lifespan=lifespan)

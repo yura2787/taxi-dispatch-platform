@@ -1,10 +1,11 @@
 """Snapshots for the dispatcher map pages (app/ws/broadcaster.py): the latest-wins
 slot of one page, and the broadcaster that builds one snapshot per tick for all of
-them (subscriptions and their limit, failures, metrics).
+them (subscriptions and their limit, failures, metrics, the loop and its schedule).
 
 The broadcaster gets a stand-in DriverStore: what it reads from Redis is covered by
-test_live_drivers.py. No timers: time is FakeClock, and a waiting task is given a
-chance to run with yields to the event loop (asyncio.sleep(0)), never a real delay.
+test_live_drivers.py. Time is FakeClock, and a waiting task is given a chance to
+run with yields to the event loop (asyncio.sleep(0)). Only the loop runs on real
+time, with the interval shortened to 0.05 s (like the WebSocket timeouts).
 """
 
 import asyncio
@@ -18,7 +19,12 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from app import config
 from app.services.drivers import DriverStatus, LiveDriver, LiveDrivers
 from app.services.snapshot import build_dispatcher_snapshot
-from app.ws.broadcaster import SnapshotBroadcaster, SnapshotSlot, TooManySubscribers
+from app.ws.broadcaster import (
+    SnapshotBroadcaster,
+    SnapshotSlot,
+    TooManySubscribers,
+    next_tick_at,
+)
 
 
 def sample(name: str) -> float:
@@ -394,3 +400,166 @@ class TestMetrics:
 
         assert sample("dispatcher_snapshot_build_seconds_count") == builds
         assert sample("dispatcher_snapshot_bytes") == size
+
+
+# ---------------------------------------------------------------------------
+# The loop
+# ---------------------------------------------------------------------------
+
+SHORT_INTERVAL_S = 0.05
+
+
+@pytest.fixture
+async def running(broadcaster):
+    """The broadcaster's loop in the background; stopped (and awaited) at the end."""
+    stop = asyncio.Event()
+    loop = asyncio.create_task(broadcaster.run(stop))
+    yield stop, loop
+    stop.set()
+    async with asyncio.timeout(1):
+        await loop
+
+
+async def reading(store: StubStore) -> None:
+    """Until a tick has started its Redis read (held there by store.release)."""
+    async with asyncio.timeout(1):
+        while store.reads == 0:
+            await asyncio.sleep(0)
+
+
+async def next_snapshot(slot: SnapshotSlot) -> str:
+    async with asyncio.timeout(1):
+        return await slot.wait()
+
+
+class TestRun:
+    async def test_without_pages_redis_is_not_read(self, broadcaster, store, running):
+        await let_tasks_run()
+
+        assert store.reads == 0
+
+    async def test_first_page_gets_a_snapshot_at_once(self, broadcaster, store, running):
+        # The interval stays at its real 2 s: the first snapshot must not wait for it.
+        await let_tasks_run()
+
+        await next_snapshot(broadcaster.subscribe())
+
+        assert store.reads == 1
+
+    async def test_page_that_was_there_before_the_loop_started_gets_snapshots(
+        self, broadcaster, store
+    ):
+        slot = broadcaster.subscribe()
+        stop = asyncio.Event()
+        loop = asyncio.create_task(broadcaster.run(stop))
+
+        await next_snapshot(slot)
+
+        stop.set()
+        await loop
+
+    async def test_ticks_repeat_while_pages_watch(self, broadcaster, store, running, monkeypatch):
+        monkeypatch.setattr(config, "DISPATCHER_SNAPSHOT_INTERVAL_S", SHORT_INTERVAL_S)
+        slot = broadcaster.subscribe()
+
+        for _ in range(3):
+            await next_snapshot(slot)
+
+        assert store.reads >= 3
+
+    async def test_loop_goes_back_to_sleep_when_the_last_page_leaves(
+        self, broadcaster, store, running, monkeypatch
+    ):
+        monkeypatch.setattr(config, "DISPATCHER_SNAPSHOT_INTERVAL_S", SHORT_INTERVAL_S)
+        slot = broadcaster.subscribe()
+        await next_snapshot(slot)
+        reads = store.reads
+
+        broadcaster.unsubscribe(slot)
+        await asyncio.sleep(4 * SHORT_INTERVAL_S)
+
+        assert store.reads == reads
+
+    async def test_page_reopened_within_the_interval_gets_a_snapshot_at_once(
+        self, broadcaster, store, running
+    ):
+        # A reload: the page leaves and comes back between two ticks. The interval
+        # stays at its real 2 s, and next_snapshot gives up after 1 s.
+        slot = broadcaster.subscribe()
+        await next_snapshot(slot)
+        broadcaster.unsubscribe(slot)
+
+        await next_snapshot(broadcaster.subscribe())
+
+        assert store.reads == 2
+
+    async def test_second_page_gets_the_last_snapshot_without_an_extra_tick(
+        self, broadcaster, store, running
+    ):
+        first = await next_snapshot(broadcaster.subscribe())
+
+        second = await next_snapshot(broadcaster.subscribe())
+
+        assert second == first
+        assert store.reads == 1
+
+    async def test_failing_ticks_do_not_stop_the_loop(
+        self, broadcaster, store, running, monkeypatch
+    ):
+        monkeypatch.setattr(config, "DISPATCHER_SNAPSHOT_INTERVAL_S", SHORT_INTERVAL_S)
+        store.failing = True
+        slot = broadcaster.subscribe()
+        async with asyncio.timeout(1):
+            while store.reads < 3:
+                await asyncio.sleep(SHORT_INTERVAL_S)
+
+        store.failing = False
+
+        assert await next_snapshot(slot)
+
+    async def test_stop_while_waiting_for_pages_ends_the_loop(self, running):
+        stop, loop = running
+        await let_tasks_run()
+
+        stop.set()
+
+        async with asyncio.timeout(1):
+            await loop
+
+    async def test_stop_between_ticks_does_not_wait_for_the_interval(self, broadcaster, running):
+        # The interval stays at its real 2 s: the loop must not sleep through it.
+        stop, loop = running
+        await next_snapshot(broadcaster.subscribe())
+
+        stop.set()
+
+        async with asyncio.timeout(1):
+            await loop
+
+    async def test_stop_during_a_tick_lets_the_tick_finish(self, broadcaster, store, running):
+        stop, loop = running
+        slot = broadcaster.subscribe()
+        store.release = asyncio.Event()
+        await reading(store)
+        stop.set()
+
+        store.release.set()
+        async with asyncio.timeout(1):
+            await loop
+
+        # The tick in progress was completed, and no other one started.
+        assert await taken(slot) is not None
+        assert store.reads == 1
+
+
+class TestSchedule:
+    def test_next_tick_keeps_the_fixed_schedule(self):
+        # A tick that took 0.3 s does not push the next one back.
+        assert next_tick_at(10.0, now=10.3, interval=2.0) == 12.0
+
+    def test_missed_ticks_are_skipped_not_caught_up(self):
+        # A stall of 5 s: the ticks due at 12 and 14 are gone, the next one is at 16.
+        assert next_tick_at(10.0, now=15.0, interval=2.0) == 16.0
+
+    def test_tick_due_exactly_now_is_not_skipped(self):
+        assert next_tick_at(10.0, now=12.0, interval=2.0) == 12.0
