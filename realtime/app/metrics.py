@@ -68,3 +68,26 @@ DISPATCHER_SNAPSHOT_SKIPPED = Counter(
     "Dispatcher map snapshots dropped for a page because a newer one came before the "
     "page took it, once per page and snapshot; a rising rate means slow pages.",
 )
+
+DISPATCHER_SNAPSHOT_BUILD = Histogram(
+    "dispatcher_snapshot_build_seconds",
+    "Time to build one dispatcher map snapshot in the gateway: Redis read, building "
+    "and JSON, once per tick for all pages.",
+    buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0),
+)
+
+DISPATCHER_SNAPSHOT_DRIVERS = Gauge(
+    "dispatcher_snapshot_drivers",
+    "Drivers on the map in the last dispatcher snapshot built by the gateway.",
+)
+
+DISPATCHER_SNAPSHOT_BYTES = Gauge(
+    "dispatcher_snapshot_bytes",
+    "Size of the last dispatcher snapshot built by the gateway, before compression.",
+)
+
+DISPATCHER_SNAPSHOT_FAILURES = Counter(
+    "dispatcher_snapshot_failures_total",
+    "Dispatcher snapshot ticks in the gateway that failed (e.g. Redis down); pages keep "
+    "the last snapshot and see its age in server_ms.",
+)

@@ -127,3 +127,12 @@ DISPATCHER_METRICS_PORT = 8002
 # Driver states read per pipeline round trip for a snapshot, like REAPER_BATCH: 1000
 # drivers take two round trips, and no single reply grows with the city.
 SNAPSHOT_READ_BATCH = 500
+
+# Map pages (WebSocket connections of admins) per gateway process. A handful of
+# dispatchers with a few tabs each fit easily; more is a leak or abuse, and every page
+# costs a ~100 KB send per snapshot. Above it a new page is closed with 1013.
+DISPATCHER_MAX_CONNECTIONS = 50
+
+# While snapshots keep failing (e.g. Redis is down), a WARNING at most this often:
+# one failure per tick would flood the log. Recovery is logged once at INFO.
+DISPATCHER_FAILURE_LOG_INTERVAL_S = 30
