@@ -36,3 +36,7 @@ def test_map_pages_get_snapshots_well_within_the_idle_timeout():
 
 def test_snapshot_loop_may_finish_a_tick_waiting_on_redis_before_it_is_cancelled():
     assert config.DISPATCHER_STOP_TIMEOUT_S > config.REDIS_SOCKET_TIMEOUT_S
+
+
+def test_a_page_may_miss_one_snapshot_before_it_is_closed_as_too_slow():
+    assert config.DISPATCHER_SEND_TIMEOUT_S >= 2 * config.DISPATCHER_SNAPSHOT_INTERVAL_S

@@ -132,6 +132,15 @@ SNAPSHOT_READ_BATCH = 500
 # enough for cars that move a few metres a second, and the page interpolates between.
 DISPATCHER_SNAPSHOT_INTERVAL_S = 2
 
+# A page that does not take a snapshot (or any message) within this time is closed
+# with 1013 and reconnects with backoff: on a link too slow for ~100 KB in 5 s it would
+# only fall further behind. At least two intervals, so one slow moment is forgiven.
+DISPATCHER_SEND_TIMEOUT_S = 5
+
+# Closing such a page gets this long: a socket that takes no data will not take the
+# close frame either, and the session must end anyway.
+DISPATCHER_CLOSE_TIMEOUT_S = 1
+
 # On shutdown, the snapshot loop gets this long to finish its tick, then it is
 # cancelled: enough for a Redis read that hits REDIS_SOCKET_TIMEOUT_S once; a tick
 # stuck longer (several slow batches) is cut short, which is what the cancel is for.

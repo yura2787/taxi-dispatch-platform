@@ -482,15 +482,28 @@ class TestMetrics:
 
 
 class SnapshotSocket:
-    """Authenticates as an admin, then waits for messages that never come; sending
-    fails as `send_fails` says (a page that vanished mid-send, or a bug)."""
+    """An admin page on a stand-in socket: authenticates, sends `frames`, then says
+    nothing more. Sending raises `send_fails`, or waits forever if it is None (a link
+    that takes nothing). The close frame raises `close_fails` if given, or waits
+    forever if `close_hangs` (as on a real stuck link, where it queues behind the
+    snapshots)."""
 
     application_state = WebSocketState.CONNECTED
     client_state = WebSocketState.CONNECTED
 
-    def __init__(self, send_fails: BaseException):
+    def __init__(
+        self,
+        *,
+        send_fails: BaseException | None = None,
+        close_hangs: bool = False,
+        close_fails: BaseException | None = None,
+        frames: tuple[str, ...] = (),
+    ):
         self._send_fails = send_fails
-        self._frames = [json.dumps({"type": "auth", "data": {"token": TOKEN}})]
+        self._close_hangs = close_hangs
+        self._close_fails = close_fails
+        self._frames = [json.dumps({"type": "auth", "data": {"token": TOKEN}}), *frames]
+        self.sends = 0
         self.closed_with: int | None = None
 
     async def accept(self) -> None:
@@ -503,10 +516,17 @@ class SnapshotSocket:
         raise AssertionError("unreachable")  # pragma: no cover
 
     async def send_text(self, text: str) -> None:
-        raise self._send_fails
+        self.sends += 1
+        if self._send_fails is not None:
+            raise self._send_fails
+        await asyncio.Event().wait()
 
     async def close(self, code: int, reason: str) -> None:
         self.closed_with = code
+        if self._close_fails is not None:
+            raise self._close_fails
+        if self._close_hangs:
+            await asyncio.Event().wait()
 
 
 async def run_until_the_first_snapshot_is_sent(socket, broadcaster, clock) -> None:
@@ -522,7 +542,7 @@ async def run_until_the_first_snapshot_is_sent(socket, broadcaster, clock) -> No
 class TestSessionEnds:
     async def test_page_that_vanished_mid_send_is_cleaned_up(self, broadcaster, clock):
         connections = open_admin_connections()
-        socket = SnapshotSocket(StarletteWebSocketDisconnect(1006))
+        socket = SnapshotSocket(send_fails=StarletteWebSocketDisconnect(1006))
 
         await run_until_the_first_snapshot_is_sent(socket, broadcaster, clock)
 
@@ -534,11 +554,119 @@ class TestSessionEnds:
         self, broadcaster, clock, caplog
     ):
         before = sample("ws_closes_total", role="admin", code="1011")
-        socket = SnapshotSocket(RuntimeError("bug"))
+        socket = SnapshotSocket(send_fails=RuntimeError("bug"))
 
         await run_until_the_first_snapshot_is_sent(socket, broadcaster, clock)
 
         assert socket.closed_with == 1011
         assert sample("ws_closes_total", role="admin", code="1011") == before + 1
         assert "Dispatcher map session of admin 1 failed" in caplog.text
+        assert broadcaster.subscribers == 0
+
+
+@pytest.fixture
+def short_send_timeouts(monkeypatch):
+    monkeypatch.setattr(config, "DISPATCHER_SEND_TIMEOUT_S", SHORT_TIMEOUT_S)
+    monkeypatch.setattr(config, "DISPATCHER_CLOSE_TIMEOUT_S", SHORT_TIMEOUT_S)
+
+
+class TestSlowPages:
+    async def test_page_that_does_not_take_a_snapshot_is_closed_with_1013(
+        self, broadcaster, clock, short_send_timeouts, caplog
+    ):
+        before = sample("ws_closes_total", role="admin", code="1013")
+        connections = open_admin_connections()
+        socket = SnapshotSocket()
+
+        await run_until_the_first_snapshot_is_sent(socket, broadcaster, clock)
+
+        assert socket.closed_with == 1013
+        assert sample("ws_closes_total", role="admin", code="1013") == before + 1
+        assert "does not keep up" in caplog.text
+        assert broadcaster.subscribers == 0
+        assert open_admin_connections() == connections
+
+    async def test_stuck_page_does_not_hold_up_the_others(self, broadcaster, clock):
+        # The real 5 s send timeout: the stuck page stays stuck for the whole test.
+        socket = SnapshotSocket()
+        stuck = asyncio.create_task(DispatcherSession(socket, broadcaster, clock).run())
+        await until(lambda: broadcaster.subscribers == 1)
+        other = broadcaster.subscribe()
+        try:
+            assert await broadcaster.tick()
+            await until(lambda: socket.sends == 1)  # the stuck page is mid-send now
+
+            for _ in range(3):
+                async with asyncio.timeout(1):
+                    # Neither the tick nor the other page waits for the stuck one.
+                    assert await broadcaster.tick()
+                    await other.wait()
+            # Still stuck in its first send: the real timeout was in effect.
+            assert not stuck.done()
+            assert socket.closed_with is None
+        finally:
+            broadcaster.unsubscribe(other)
+            stuck.cancel()
+            await asyncio.gather(stuck, return_exceptions=True)
+        assert socket.sends == 1  # its newer snapshots only replaced each other
+        # A session cancelled mid-send (e.g. on shutdown) lets go of its slot too.
+        assert broadcaster.subscribers == 0
+
+    async def test_page_that_takes_no_close_frame_either_still_ends(
+        self, broadcaster, clock, short_send_timeouts, caplog
+    ):
+        socket = SnapshotSocket(close_hangs=True)
+
+        await run_until_the_first_snapshot_is_sent(socket, broadcaster, clock)
+
+        assert socket.closed_with == 1013
+        assert "did not take the close frame in time" in caplog.text
+        assert broadcaster.subscribers == 0
+
+    async def test_page_that_does_not_take_a_pong_is_closed_with_1013(
+        self, broadcaster, clock, short_send_timeouts
+    ):
+        # Every send has the timeout, not only the snapshots.
+        socket = SnapshotSocket(frames=(json.dumps({"type": "ping", "data": {}}),))
+
+        session = asyncio.create_task(DispatcherSession(socket, broadcaster, clock).run())
+        async with asyncio.timeout(1):
+            await session
+
+        assert socket.closed_with == 1013
+        assert socket.sends == 1
+
+    async def test_bug_with_a_close_that_hangs_still_ends_the_session(
+        self, broadcaster, clock, short_send_timeouts, caplog
+    ):
+        socket = SnapshotSocket(send_fails=RuntimeError("bug"), close_hangs=True)
+
+        await run_until_the_first_snapshot_is_sent(socket, broadcaster, clock)
+
+        assert socket.closed_with == 1011
+        assert "did not take the close frame in time" in caplog.text
+        assert broadcaster.subscribers == 0
+
+    async def test_timeout_error_from_the_socket_itself_is_a_bug_not_a_slow_page(
+        self, broadcaster, clock, short_send_timeouts
+    ):
+        # Only the session's own limit means "too slow": anything else must show.
+        socket = SnapshotSocket(send_fails=TimeoutError("from the transport"))
+
+        await run_until_the_first_snapshot_is_sent(socket, broadcaster, clock)
+
+        assert socket.closed_with == 1011
+
+    async def test_timeout_error_from_the_close_itself_is_not_swallowed(
+        self, broadcaster, clock, short_send_timeouts
+    ):
+        socket = SnapshotSocket(close_fails=TimeoutError("from the transport"))
+        session = asyncio.create_task(DispatcherSession(socket, broadcaster, clock).run())
+        await until(lambda: broadcaster.subscribers == 1)
+        assert await broadcaster.tick()
+
+        with pytest.raises(TimeoutError, match="from the transport"):
+            async with asyncio.timeout(1):
+                await session
+
         assert broadcaster.subscribers == 0

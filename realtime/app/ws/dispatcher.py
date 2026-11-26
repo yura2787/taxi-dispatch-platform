@@ -8,8 +8,12 @@ Life of a connection:
 2. subscribe to the snapshot broadcaster (1013 above DISPATCHER_MAX_CONNECTIONS); the
    first dispatcher_snapshot comes at once, from the broadcaster;
 3. send every snapshot the slot hands out and answer ping, until the client leaves,
-   goes idle (4000), floods (1008) or sends a too big message (1009);
+   goes idle (4000), floods (1008), sends a too big message (1009) or does not take
+   what is sent within DISPATCHER_SEND_TIMEOUT_S (1013);
 4. on the way out, unsubscribe.
+
+A slow page never slows the others: the broadcaster only fills its slot (the latest
+snapshot wins), and only this session's task sends on its socket.
 
 Several tabs of one admin are fine: there is no takeover (4409) here. The page changes
 nothing in Redis; it only watches.
@@ -143,7 +147,7 @@ class DispatcherSession:
                 if snapshot in done:
                     text = snapshot.result()
                     snapshot = None
-                    await self._websocket.send_text(text)
+                    await self._send_text(text)
         finally:
             for task in (receive, snapshot):
                 if task is not None:
@@ -179,20 +183,42 @@ class DispatcherSession:
     # ------------------------------------------------------------------
 
     async def _send_text(self, text: str) -> None:
-        await self._websocket.send_text(text)
+        """Send, or close with 1013 if the page does not take it in time.
+
+        Every send of the session goes through here: a page that takes no snapshot
+        takes no pong either.
+        """
+        try:
+            async with asyncio.timeout(config.DISPATCHER_SEND_TIMEOUT_S) as limit:
+                await self._websocket.send_text(text)
+        except TimeoutError:
+            if not limit.expired():
+                raise  # a TimeoutError from below, not this limit: a bug to see
+            raise WsClose(
+                CloseCode.TRY_AGAIN_LATER, "the page does not keep up with the snapshots"
+            ) from None
 
     async def _error(self, code: ErrorCode) -> None:
         await self._send_text(ErrorMessage.build(code, _ERROR_TEXT[code]).model_dump_json())
 
     async def _close(self, code: CloseCode, reason: str) -> None:
-        await close_socket(
-            self._websocket,
-            code,
-            reason,
-            role=self._role,
-            endpoint="dispatcher",
-            who=f"admin {self._user_id or '?'}",
-        )
+        # A socket that took no snapshot may not take the close frame either: the
+        # session ends after DISPATCHER_CLOSE_TIMEOUT_S anyway (the close is already
+        # counted and logged by then), and the server drops the connection.
+        try:
+            async with asyncio.timeout(config.DISPATCHER_CLOSE_TIMEOUT_S) as limit:
+                await close_socket(
+                    self._websocket,
+                    code,
+                    reason,
+                    role=self._role,
+                    endpoint="dispatcher",
+                    who=f"admin {self._user_id or '?'}",
+                )
+        except TimeoutError:
+            if not limit.expired():
+                raise
+            logger.warning("Admin %s did not take the close frame in time", self._user_id or "?")
 
     def _cleanup(self) -> None:
         if self._slot is not None:
