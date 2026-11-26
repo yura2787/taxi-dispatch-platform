@@ -16,6 +16,7 @@ from app.redis_client import create_redis
 from app.services.drivers import DriverStore
 from app.services.osrm import CITY_CENTRE, NoRoute, OsrmClient, OsrmUnavailable
 from app.ws.broadcaster import SnapshotBroadcaster
+from app.ws.dispatcher import router as dispatcher_ws_router
 from app.ws.driver import router as driver_ws_router
 from app.ws.manager import ConnectionRegistry
 
@@ -81,6 +82,7 @@ async def _stop_task(task: asyncio.Task, stop: asyncio.Event) -> None:
 
 app = FastAPI(title="RideFlow realtime", lifespan=lifespan)
 app.include_router(driver_ws_router)
+app.include_router(dispatcher_ws_router)
 
 
 async def _redis_status(request: Request) -> str:
