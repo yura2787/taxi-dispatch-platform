@@ -121,3 +121,9 @@ REAPER_BATCH = 500
 
 # Prometheus metrics of the dispatcher. Not published outside the Docker network.
 DISPATCHER_METRICS_PORT = 8002
+
+# --- Dispatcher map ---
+# (The map page of admins, served by the gateway; not the dispatcher process above.)
+# Driver states read per pipeline round trip for a snapshot, like REAPER_BATCH: 1000
+# drivers take two round trips, and no single reply grows with the city.
+SNAPSHOT_READ_BATCH = 500

@@ -93,6 +93,33 @@ class DriverCounts:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveDriver:
+    """An online driver with a position, as the dispatcher map shows them."""
+
+    id: int
+    lat: float
+    lon: float
+    # None when the phone did not report it (the car stands still).
+    heading: float | None
+    status: DriverStatus
+    tariff: str | None
+    # False between a dropped connection and the reaper (or a reconnect).
+    connected: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LiveDrivers:
+    """What the dispatcher map is built from: the drivers and the counters."""
+
+    # By id; only drivers with a position.
+    drivers: tuple[LiveDriver, ...]
+    # In drivers:last_seen when it was read, positions or not.
+    online: int
+    # Can be offered an order right now: in a GEO set.
+    available: int
+
+
+@dataclass(frozen=True, slots=True)
 class LocationUpdate:
     """A point that passed LocationFilter, with what Redis stores besides it."""
 
@@ -226,6 +253,39 @@ class DriverStore:
             online, *available = await pipe.execute()
         return DriverCounts(online=online, available=sum(available))
 
+    async def live_drivers(self) -> LiveDrivers:
+        """Every online driver with a position, for the dispatcher map. Writes nothing.
+
+        Plain commands in a pipeline, not a Lua script: a script would block Redis for
+        the whole read, and the drivers' points must get in between. So the read is not
+        a consistent snapshot: a driver taken offline after the listing is skipped, and
+        `online` stays the count of the listing, like drivers_online does.
+        """
+        listed = await self._redis.zrange(redis_keys.drivers_last_seen(), 0, -1)
+        ids = sorted(int(member) for member in listed)
+        geo_keys = _geo_keys()
+        batch = config.SNAPSHOT_READ_BATCH
+        drivers: list[LiveDriver] = []
+        available = 0
+        # range() gives one batch even for an empty city: it carries the GEO counts.
+        for start in range(0, max(len(ids), 1), batch):
+            chunk = ids[start : start + batch]
+            async with self._redis.pipeline(transaction=False) as pipe:
+                if start == 0:
+                    for key in geo_keys:
+                        pipe.zcard(key)
+                for driver_id in chunk:
+                    pipe.hmget(redis_keys.driver_state(driver_id), _LIVE_FIELDS)
+                replies = await pipe.execute()
+            if start == 0:
+                available = sum(replies[: len(geo_keys)])
+                replies = replies[len(geo_keys) :]
+            for driver_id, values in zip(chunk, replies, strict=True):
+                driver = _parse_live(driver_id, values)
+                if driver is not None:
+                    drivers.append(driver)
+        return LiveDrivers(drivers=tuple(drivers), online=len(ids), available=available)
+
     @staticmethod
     async def _run(script: AsyncScript, *, keys: list[str], args: list) -> Outcome:
         return Outcome((await script(keys=keys, args=args)).decode())
@@ -247,6 +307,33 @@ def _optional(value: float | None) -> float | str:
 
 def _decode(raw: dict[bytes, bytes]) -> dict[str, str]:
     return {key.decode(): value.decode() for key, value in raw.items()}
+
+
+# The state fields of the map, in the order _parse_live reads them.
+_LIVE_FIELDS = ("status", "lat", "lon", "heading", "tariff", "conn_id")
+
+
+def _parse_live(driver_id: int, values: list[bytes | None]) -> LiveDriver | None:
+    """None for a driver who left between the listing and the read (offline, or the
+    state expired) or has no position yet.
+
+    Values that do not parse raise, like in _parse_state: only the Lua scripts write
+    the state, so a broken one is a bug to see, not a driver to hide.
+    """
+    status, lat, lon, heading, tariff, conn_id = (
+        None if value is None else value.decode() for value in values
+    )
+    if status is None or status == DriverStatus.OFFLINE or lat is None or lon is None:
+        return None
+    return LiveDriver(
+        id=driver_id,
+        lat=float(lat),
+        lon=float(lon),
+        heading=None if heading is None else float(heading),
+        status=DriverStatus(status),
+        tariff=tariff,
+        connected=bool(conn_id),
+    )
 
 
 def _parse_state(fields: dict[str, str]) -> DriverState:
