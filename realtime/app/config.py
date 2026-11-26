@@ -121,3 +121,36 @@ REAPER_BATCH = 500
 
 # Prometheus metrics of the dispatcher. Not published outside the Docker network.
 DISPATCHER_METRICS_PORT = 8002
+
+# --- Dispatcher map ---
+# (The map page of admins, served by the gateway; not the dispatcher process above.)
+# Driver states read per pipeline round trip for a snapshot, like REAPER_BATCH: 1000
+# drivers take two round trips, and no single reply grows with the city.
+SNAPSHOT_READ_BATCH = 500
+
+# A full snapshot of the city goes to every map page this often (spec 12.7): smooth
+# enough for cars that move a few metres a second, and the page interpolates between.
+DISPATCHER_SNAPSHOT_INTERVAL_S = 2
+
+# A page that does not take a snapshot (or any message) within this time is closed
+# with 1013 and reconnects with backoff: on a link too slow for ~100 KB in 5 s it would
+# only fall further behind. At least two intervals, so one slow moment is forgiven.
+DISPATCHER_SEND_TIMEOUT_S = 5
+
+# Closing such a page gets this long: a socket that takes no data will not take the
+# close frame either, and the session must end anyway.
+DISPATCHER_CLOSE_TIMEOUT_S = 1
+
+# On shutdown, the snapshot loop gets this long to finish its tick, then it is
+# cancelled: enough for a Redis read that hits REDIS_SOCKET_TIMEOUT_S once; a tick
+# stuck longer (several slow batches) is cut short, which is what the cancel is for.
+DISPATCHER_STOP_TIMEOUT_S = 5
+
+# Map pages (WebSocket connections of admins) per gateway process. A handful of
+# dispatchers with a few tabs each fit easily; more is a leak or abuse, and every page
+# costs a ~100 KB send per snapshot. Above it a new page is closed with 1013.
+DISPATCHER_MAX_CONNECTIONS = 50
+
+# While snapshots keep failing (e.g. Redis is down), a WARNING at most this often:
+# one failure per tick would flood the log. Recovery is logged once at INFO.
+DISPATCHER_FAILURE_LOG_INTERVAL_S = 30
